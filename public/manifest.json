@@ -1,0 +1,24 @@
+{
+  "name": "Glazy Days - Donut E-Commerce",
+  "short_name": "Glazy Days",
+  "description": "Handcrafted premium donuts online ordering & delivery in Laguna",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#CD2C58",
+  "theme_color": "#CD2C58",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/assets/glazyDayslogo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/glazyDayslogo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
