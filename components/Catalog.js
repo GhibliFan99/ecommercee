@@ -1,4 +1,4 @@
-import { donuts } from "../data/donuts";
+import { donuts, getDonutImage } from "../data/donuts";
 import { useState } from "react";
 import "../styles/Catalog.css";
 import "../styles/DonutCard.css";
@@ -28,7 +28,12 @@ function Catalog({ products, searchQuery, addToCart }) {
         <div className="cards">
           {filteredDonuts.map((donut) => (
             <div key={donut.id} className="donut-card">
-              <img src={donut.image} alt={donut.name} className="donut-image" />
+              <img
+                src={getDonutImage(donut)}
+                alt={donut.name}
+                className="donut-image"
+                loading="lazy"
+              />
               <h3 className="donut-name">{donut.name}</h3>
               <p className="donut-description">{donut.description}</p>
               <p className="donut-price">₱{donut.price}</p>

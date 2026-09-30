@@ -3,6 +3,7 @@ import { FaTrash } from "react-icons/fa";
 import Footer from "../components/Footer";
 import "../styles/Cart.css";
 import { useNavigate } from "react-router-dom"; 
+import { getDonutImage } from "../data/donuts";
 
 function Cart({ cart, increaseQty, decreaseQty, removeItem }) {
   const navigate = useNavigate(); 
@@ -23,7 +24,7 @@ function Cart({ cart, increaseQty, decreaseQty, removeItem }) {
           <>
             {cart.map((item) => (
               <div className="cart-item" key={item.id}>
-                <img src={item.image} alt={item.name} />
+                <img src={getDonutImage(item)} alt={item.name} />
                 <div className="cart-item-info">
                   <p className="cart-item-name">{item.name}</p>
                   <p className="cart-item-price">₱{item.price}</p>
