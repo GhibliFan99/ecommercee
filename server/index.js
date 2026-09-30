@@ -100,24 +100,14 @@ function initializeDatabase() {
     );
   `);
 
-  const adminExists = db.prepare('SELECT 1 FROM admins WHERE username = ?').get('admin');
-  if (!adminExists) {
-    const hash = bcrypt.hashSync('admin123', 10);
+  const graceHash = bcrypt.hashSync('grace123', 10);
+  const graceAdmin = db.prepare('SELECT * FROM admins WHERE email = ? OR username = ?').get('grace@glazydays.com', 'grace@glazydays.com');
+  if (!graceAdmin) {
     db.prepare(
       'INSERT INTO admins (username, email, password_hash) VALUES (?, ?, ?)'
-    ).run('admin', 'admin@glazydays.com', hash);
-  }
-
-  const graceExists = db.prepare('SELECT 1 FROM admins WHERE username = ?').get('grace123');
-  if (!graceExists) {
-    const graceHash = bcrypt.hashSync('grace123', 10);
-    db.prepare(
-      'INSERT INTO admins (username, email, password_hash) VALUES (?, ?, ?)'
-    ).run('grace123', 'grace@glazydays.com', graceHash);
+    ).run('grace@glazydays.com', 'grace@glazydays.com', graceHash);
   } else {
-    // Ensure password is grace123 in case it was created with another pass
-    const graceHash = bcrypt.hashSync('grace123', 10);
-    db.prepare('UPDATE admins SET password_hash = ? WHERE username = ?').run(graceHash, 'grace123');
+    db.prepare('UPDATE admins SET username = ?, email = ?, password_hash = ? WHERE id = ?').run('grace@glazydays.com', 'grace@glazydays.com', graceHash, graceAdmin.id);
   }
 
   try {
