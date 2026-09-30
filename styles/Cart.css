@@ -1,0 +1,232 @@
+.cart-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: #fffaf7;
+  width: 100%;
+}
+
+.cart-container {
+  flex: 1;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 40px 20px 60px;
+  box-sizing: border-box;
+}
+
+.cart-title {
+  font-size: 2.2rem;
+  color: #3b1f17;
+  text-align: center;
+  margin-bottom: 30px;
+  font-weight: 700;
+}
+
+.cart-empty {
+  text-align: center;
+  color: #7a5246;
+  font-size: 1.15rem;
+  margin-top: 50px;
+}
+
+.cart-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #ffffff;
+  border-radius: 18px; 
+  padding: 18px 24px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 14px rgba(80, 40, 20, 0.06); 
+  border: 1px solid #f6e3de;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  gap: 16px;
+}
+
+.cart-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(80, 40, 20, 0.1);
+}
+
+.cart-item img {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  border-radius: 12px;
+  background-color: #fbe4da;
+  padding: 6px;
+  flex-shrink: 0;
+}
+
+.cart-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.cart-item-name {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: #3b1f17;
+  margin: 0 0 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cart-item-price {
+  color: #CD2C58;
+  font-weight: 700;
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.cart-item-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.qty-btn {
+  background-color: #bb604a;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s ease, transform 0.1s ease;
+  touch-action: manipulation;
+}
+
+.qty-btn:hover {
+  background-color: #d45b52;
+}
+
+.qty-btn:active {
+  transform: scale(0.92);
+}
+
+.cart-quantity {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #3b1f17;
+  min-width: 24px;
+  text-align: center;
+}
+
+.remove-btn {
+  background-color: transparent;
+  border: none;
+  color: #dc2626;
+  font-size: 1.15rem;
+  cursor: pointer;
+  padding: 6px;
+  margin-left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: color 0.2s ease, transform 0.1s ease;
+}
+
+.remove-btn:hover {
+  color: #991b1b;
+  transform: scale(1.1);
+}
+
+.cart-total {
+  margin-top: 25px;
+  text-align: right;
+  font-size: 1.45rem; 
+  font-weight: 800;
+  color: #3b1f17;
+}
+
+.checkout-btn {
+  display: block;
+  width: 100%;
+  background-color: #CD2C58;
+  color: white;
+  font-size: 1.15rem;
+  font-weight: 700;
+  padding: 16px; 
+  border: none;
+  border-radius: 14px;
+  cursor: pointer;
+  margin-top: 20px;
+  box-shadow: 0 4px 14px rgba(205, 44, 88, 0.3);
+  transition: background-color 0.2s ease, transform 0.1s ease;
+  touch-action: manipulation;
+}
+
+.checkout-btn:hover {
+  background-color: #b52249;
+}
+
+.checkout-btn:active {
+  transform: scale(0.98);
+}
+
+/* ========================================================
+   RESPONSIVE CART (Tablets & Mobile: iPhone/Android)
+   ======================================================== */
+@media (max-width: 600px) {
+  .cart-container {
+    padding: 20px 14px 40px;
+  }
+
+  .cart-title {
+    font-size: 1.7rem;
+    margin-bottom: 20px;
+  }
+
+  .cart-item {
+    padding: 14px;
+    border-radius: 14px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .cart-item img {
+    width: 65px;
+    height: 65px;
+  }
+
+  .cart-item-name {
+    font-size: 1rem;
+    white-space: normal;
+  }
+
+  .cart-item-price {
+    font-size: 0.95rem;
+  }
+
+  .cart-item-controls {
+    width: 100%;
+    justify-content: flex-end;
+    padding-top: 8px;
+    border-top: 1px solid #fbf0ec;
+  }
+
+  .qty-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .cart-total {
+    text-align: center;
+    font-size: 1.3rem;
+  }
+
+  .checkout-btn {
+    padding: 14px;
+    font-size: 1.05rem;
+  }
+}

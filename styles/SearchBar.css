@@ -1,0 +1,60 @@
+.search-bar-form {
+  display: flex;
+  max-width: 500px;
+  width: 100%;
+  margin: 2.5rem auto 1.5rem;
+  border-radius: 9999px;
+  overflow: hidden;
+  box-shadow: 0px 8px 18px rgba(80, 40, 20, 0.12);
+  background-color: white;
+  border: 1.5px solid #f0c8bf;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.search-bar-form:focus-within {
+  border-color: #CD2C58;
+  box-shadow: 0px 8px 20px rgba(205, 44, 88, 0.2);
+}
+
+.search-bar-input {
+  flex-grow: 1;
+  padding: 12px 20px;
+  border: none;
+  outline: none;
+  font-size: 16px; /* Prevents auto-zoom on iOS Safari */
+  color: #3b1f17;
+  min-width: 0;
+}
+
+.search-bar-button {
+  background-color: #CD2C58;
+  color: white;
+  padding: 12px 22px;
+  border: none;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.95rem;
+  transition: background-color 0.2s ease;
+  white-space: nowrap;
+}
+
+.search-bar-button:hover {
+  background-color: #b52249;
+}
+
+@media (max-width: 600px) {
+  .search-bar-form {
+    margin: 1.5rem auto 1rem;
+    max-width: 95%;
+  }
+
+  .search-bar-input {
+    padding: 10px 16px;
+    font-size: 15px;
+  }
+
+  .search-bar-button {
+    padding: 10px 18px;
+    font-size: 0.88rem;
+  }
+}

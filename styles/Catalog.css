@@ -1,0 +1,27 @@
+.catalog-container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 30px 20px 60px;
+  background-color: #ffffff;
+  min-height: 400px;
+}
+
+.no-results {
+  text-align: center;
+  color: #7a5246;
+  font-size: 1.2rem;
+  padding: 40px 20px;
+  margin: 0;
+}
+
+@media (max-width: 768px) {
+  .catalog-container {
+    padding: 16px 12px 40px;
+  }
+
+  .no-results {
+    font-size: 1rem;
+    padding: 30px 16px;
+  }
+}

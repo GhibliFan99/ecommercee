@@ -1,0 +1,45 @@
+.donut-banner {
+  background-color: #FF7A66; 
+  color: #fff;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 1.5rem 1rem;
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+}
+
+.banner-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 900px;
+}
+
+.banner-text {
+  text-align: center;
+  padding: 0 1rem;
+}
+
+.banner-text h2 {
+  font-size: clamp(1.5rem, 5vw, 2.5rem);
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: 1px;
+  line-height: 1.2;
+}
+
+.banner-text p {
+  font-size: clamp(0.95rem, 3vw, 1.25rem);
+  margin-top: 0.4rem;
+  margin-bottom: 0;
+  opacity: 0.95;
+}
+
+@media (max-width: 600px) {
+  .donut-banner {
+    padding: 1.2rem 0.8rem;
+  }
+}

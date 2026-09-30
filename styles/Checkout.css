@@ -1,0 +1,257 @@
+@import url('https://fonts.googleapis.com/css2?family=Macondo+Swash+Caps&display=swap');
+
+.checkout-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: #fffaf7;
+  width: 100%;
+}
+
+.checkout-container {
+  flex: 1;
+  max-width: 860px; 
+  width: 100%; 
+  margin: 0 auto;
+  padding: 35px 20px 60px;
+  box-sizing: border-box;
+}
+
+.checkout-title {
+  font-size: 2.2rem;
+  color: #3b1f17;
+  text-align: center;
+  margin-bottom: 25px;
+  font-weight: 700;
+}
+
+.order-summary,
+.payment-method,
+.customer-info {
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 26px 30px;
+  box-shadow: 0 4px 14px rgba(80, 40, 20, 0.06);
+  border: 1px solid #f6e3de;
+  margin-bottom: 25px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.order-summary h2,
+.payment-method h2,
+.customer-info h2 {
+  font-size: 1.25rem;
+  margin-bottom: 16px;
+  color: #3b1f17;
+  font-weight: 700;
+}
+
+.order-summary ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 15px 0;
+}
+
+.order-summary li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 1.05rem;
+  color: #555;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #f6e3de;
+}
+
+.order-summary h3 {
+  color: #3b1f17;
+  margin-top: 15px;
+  font-size: 1.35rem;
+}
+
+.customer-info form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.customer-info label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #5b2d1c;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+
+.customer-info input,
+.customer-info select {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1.5px solid #ebd2cb;
+  font-size: 16px; /* Prevents auto-zoom on iOS */
+  color: #3b1f17;
+  width: 100%;
+  box-sizing: border-box;
+  background-color: #fff;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.customer-info input:focus,
+.customer-info select:focus {
+  outline: none;
+  border-color: #CD2C58;
+  box-shadow: 0 0 0 3px rgba(205, 44, 88, 0.15);
+}
+
+.payment-method label {
+  display: flex;
+  align-items: center;
+  gap: 10px; 
+  margin-bottom: 10px;
+  font-size: 1.05rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.checkout-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 25px;
+}
+
+.confirm-btn,
+.cancel-btn {
+  flex: 1;
+  padding: 16px;
+  border: none;
+  border-radius: 14px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  touch-action: manipulation;
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-btn {
+  background-color: #CD2C58;
+  color: white;
+  box-shadow: 0 4px 14px rgba(205, 44, 88, 0.3);
+}
+
+.confirm-btn:hover {
+  background-color: #b52249;
+}
+
+.cancel-btn {
+  background-color: #e5e7eb;
+  color: #4b5563;
+}
+
+.cancel-btn:hover {
+  background-color: #d1d5db;
+}
+
+.order-confirmed {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 30px 20px;
+  background: #fff;
+  border-radius: 20px;
+  box-shadow: 0 8px 24px rgba(80, 40, 20, 0.08);
+  max-width: 680px; 
+  margin: 30px auto;
+  width: 92%;
+  box-sizing: border-box;
+}
+
+.order-confirmed h2 {
+  font-size: 1.8rem;
+  margin-bottom: 10px;
+}
+
+.brand-name {
+  font-family: 'Macondo Swash Caps', cursive;
+  color: #ff7a66;
+  font-size: 1.6rem;
+  letter-spacing: 1px;
+}
+
+/* ========================================================
+   RESPONSIVE CHECKOUT (Tablets & Mobile: iPhone/Android)
+   ======================================================== */
+@media (max-width: 768px) {
+  .checkout-container {
+    padding: 20px 14px 40px;
+  }
+
+  .checkout-title {
+    font-size: 1.75rem;
+    margin-bottom: 18px;
+  }
+
+  .order-summary,
+  .payment-method,
+  .customer-info {
+    padding: 20px 16px;
+    border-radius: 14px;
+    margin-bottom: 18px;
+  }
+
+  .order-summary li {
+    font-size: 0.95rem;
+  }
+
+  .order-summary h3 {
+    font-size: 1.2rem;
+  }
+
+  .checkout-actions {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .confirm-btn,
+  .cancel-btn {
+    width: 100%;
+    padding: 14px;
+    font-size: 1.05rem;
+  }
+
+  .order-confirmed {
+    padding: 24px 14px;
+    margin: 15px auto 30px;
+  }
+
+  .order-confirmed h2 {
+    font-size: 1.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .checkout-container {
+    padding: 16px 10px 30px;
+  }
+
+  .order-summary,
+  .payment-method,
+  .customer-info {
+    padding: 16px 12px;
+  }
+
+  .order-summary li {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+}
