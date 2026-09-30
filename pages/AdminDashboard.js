@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import "../styles/App.css"; // Basic styles if needed
+import { donuts, getDonutImage } from "../data/donuts";
+import "../styles/App.css";
 
 function AdminDashboard() {
   const navigate = useNavigate();
@@ -35,35 +36,142 @@ function AdminDashboard() {
     fetchData();
   }, [navigate, token]);
 
+  const getSampleOrders = () => [
+    {
+      id: 1,
+      order_number: "ORD-100245",
+      customer_name: "Maria Santos",
+      customer_email: "maria.santos@gmail.com",
+      customer_contact: "0917-555-1234",
+      customer_address: "123 Mabini St, Cabuyao, Laguna",
+      total_amount: 340.00,
+      payment_status: "Pending Verification",
+      order_status: "Pending Payment",
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+    },
+    {
+      id: 2,
+      order_number: "ORD-100244",
+      customer_name: "Juan Dela Cruz",
+      customer_email: "juan.delacruz@yahoo.com",
+      customer_contact: "0918-777-8899",
+      customer_address: "Block 5 Lot 12, Santa Rosa, Laguna",
+      total_amount: 520.00,
+      payment_status: "Verified",
+      order_status: "Confirmed",
+      created_at: new Date(Date.now() - 86400000).toISOString(),
+    },
+  ];
+
+  const getSamplePayments = () => [
+    {
+      id: 1,
+      order_id: 1,
+      order_number: "ORD-100245",
+      customer_name: "Maria Santos",
+      customer_email: "maria.santos@gmail.com",
+      amount: 340.00,
+      payment_method: "GCash",
+      payment_reference: "GCASH-987654321",
+      status: "Pending Verification",
+      order_status: "Pending Payment",
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+    },
+    {
+      id: 2,
+      order_id: 2,
+      order_number: "ORD-100244",
+      customer_name: "Juan Dela Cruz",
+      customer_email: "juan.delacruz@yahoo.com",
+      amount: 520.00,
+      payment_method: "Maya",
+      payment_reference: "MAYA-1122334455",
+      status: "Verified",
+      order_status: "Confirmed",
+      verified_at: new Date(Date.now() - 80000000).toISOString(),
+      created_at: new Date(Date.now() - 86400000).toISOString(),
+    },
+  ];
+
+  const getSampleCustomers = () => [
+    {
+      id: 1,
+      full_name: "Maria Santos",
+      email: "maria.santos@gmail.com",
+      contact_number: "0917-555-1234",
+      address: "123 Mabini St, Cabuyao, Laguna",
+      order_count: 1,
+      total_spent: 340.00,
+      created_at: new Date(Date.now() - 86400000 * 5).toISOString(),
+    },
+    {
+      id: 2,
+      full_name: "Juan Dela Cruz",
+      email: "juan.delacruz@yahoo.com",
+      contact_number: "0918-777-8899",
+      address: "Block 5 Lot 12, Santa Rosa, Laguna",
+      order_count: 3,
+      total_spent: 1450.00,
+      created_at: new Date(Date.now() - 86400000 * 12).toISOString(),
+    }
+  ];
+
   const fetchData = async () => {
     setLoading(true);
     try {
       const headers = { Authorization: `Bearer ${token}` };
       
       const [salesRes, productsRes, ordersRes, customersRes, paymentsRes] = await Promise.all([
-        fetch("http://localhost:3001/api/sales", { headers }),
-        fetch("http://localhost:3001/api/products"),
-        fetch("http://localhost:3001/api/orders", { headers }),
-        fetch("http://localhost:3001/api/admin/customers", { headers }),
-        fetch("http://localhost:3001/api/payments", { headers }),
+        fetch("http://localhost:3001/api/sales", { headers }).catch(() => null),
+        fetch("http://localhost:3001/api/products").catch(() => null),
+        fetch("http://localhost:3001/api/orders", { headers }).catch(() => null),
+        fetch("http://localhost:3001/api/admin/customers", { headers }).catch(() => null),
+        fetch("http://localhost:3001/api/payments", { headers }).catch(() => null),
       ]);
 
-      if (!salesRes.ok) throw new Error("Unauthorized");
+      if (salesRes && salesRes.ok && productsRes && productsRes.ok) {
+        const salesData = await salesRes.json();
+        const productsData = await productsRes.json();
+        const ordersData = ordersRes && ordersRes.ok ? await ordersRes.json() : [];
+        const customersData = customersRes && customersRes.ok ? await customersRes.json() : [];
+        const paymentsData = paymentsRes && paymentsRes.ok ? await paymentsRes.json() : [];
 
-      const salesData = await salesRes.json();
-      const productsData = await productsRes.json();
-      const ordersData = await ordersRes.json();
-      const customersData = customersRes.ok ? await customersRes.json() : [];
-      const paymentsData = paymentsRes.ok ? await paymentsRes.json() : [];
+        setStats(salesData);
+        setProducts(productsData);
+        setOrders(ordersData);
+        setCustomers(customersData);
+        setPayments(paymentsData);
+        setLoading(false);
+        return;
+      }
+      throw new Error("Backend offline, using demo data");
+    } catch (_err) {
+      // Vercel / Offline Demo Mode:
+      const savedProducts = JSON.parse(localStorage.getItem("glazy_products") || "null") || donuts;
+      const savedOrders = JSON.parse(localStorage.getItem("glazy_orders") || "null") || getSampleOrders();
+      const savedPayments = JSON.parse(localStorage.getItem("glazy_payments") || "null") || getSamplePayments();
+      const savedCustomers = JSON.parse(localStorage.getItem("glazy_customers") || "null") || getSampleCustomers();
 
-      setStats(salesData);
-      setProducts(productsData);
-      setOrders(ordersData);
-      setCustomers(customersData);
-      setPayments(paymentsData);
-    } catch (err) {
-      console.error(err);
-      navigate("/admin/login");
+      const totalSales = savedOrders
+        .filter(o => o.order_status === "Confirmed" || o.order_status === "Completed" || o.payment_status === "Verified")
+        .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+
+      setProducts(savedProducts);
+      setOrders(savedOrders);
+      setPayments(savedPayments);
+      setCustomers(savedCustomers);
+      setStats({
+        stats: {
+          total_sales: totalSales,
+          total_orders: savedOrders.length,
+          pending_verification_orders: savedPayments.filter(p => p.status === "Pending Verification").length,
+          paid_orders: savedPayments.filter(p => p.status === "Verified").length,
+          completed_orders: savedOrders.filter(o => o.order_status === "Completed").length,
+          pending_orders: savedOrders.filter(o => o.order_status === "Pending Payment" || o.order_status === "Pending").length,
+          cancelled_orders: savedOrders.filter(o => o.order_status === "Cancelled").length,
+        },
+        history: savedOrders,
+      });
     } finally {
       setLoading(false);
     }
@@ -71,6 +179,7 @@ function AdminDashboard() {
 
   const handleLogout = () => {
     localStorage.removeItem("glazy_admin_token");
+    localStorage.removeItem("glazy_admin_user");
     navigate("/admin/login");
   };
 
@@ -92,28 +201,39 @@ function AdminDashboard() {
         body: JSON.stringify(productForm),
       });
 
-      if (!res.ok) throw new Error("Failed to save product");
-      
-      setShowProductModal(false);
-      setEditingProduct(null);
-      fetchData(); // Refresh data
-    } catch (err) {
-      alert(err.message);
+      if (!res.ok) throw new Error("Failed to save product on server");
+    } catch (_err) {
+      // Local fallback
+      let currentProducts = [...products];
+      if (editingProduct) {
+        currentProducts = currentProducts.map(p => p.id === editingProduct.id ? { ...p, ...productForm } : p);
+      } else {
+        const newP = { id: Date.now(), ...productForm, stock_quantity: Number(productForm.stock_quantity || 10) };
+        currentProducts.push(newP);
+      }
+      setProducts(currentProducts);
+      localStorage.setItem("glazy_products", JSON.stringify(currentProducts));
     }
+
+    setShowProductModal(false);
+    setEditingProduct(null);
+    fetchData();
   };
 
   const handleDeleteProduct = async (id) => {
     if (!window.confirm("Are you sure you want to delete this product?")) return;
     try {
-      const res = await fetch(`http://localhost:3001/api/products/${id}`, {
+      await fetch(`http://localhost:3001/api/products/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error("Failed to delete product");
-      fetchData();
-    } catch (err) {
-      alert(err.message);
+    } catch (_err) {
+      // Local fallback
+      const updated = products.filter(p => p.id !== id);
+      setProducts(updated);
+      localStorage.setItem("glazy_products", JSON.stringify(updated));
     }
+    fetchData();
   };
 
   const openProductForm = (product = null) => {
@@ -139,11 +259,14 @@ function AdminDashboard() {
         body: JSON.stringify({ stock_quantity: Number(newStock) }),
       });
       if (!res.ok) throw new Error("Failed to update stock");
-      alert("Stock updated successfully");
-      fetchData();
-    } catch (err) {
-      alert(err.message);
+    } catch (_err) {
+      // Local fallback
+      const updated = products.map(p => p.id === id ? { ...p, stock_quantity: Number(newStock) } : p);
+      setProducts(updated);
+      localStorage.setItem("glazy_products", JSON.stringify(updated));
     }
+    alert("Stock updated successfully");
+    fetchData();
   };
 
   // --- Order Management ---
@@ -158,10 +281,13 @@ function AdminDashboard() {
         body: JSON.stringify({ order_status: newStatus }),
       });
       if (!res.ok) throw new Error("Failed to update status");
-      fetchData();
-    } catch (err) {
-      alert(err.message);
+    } catch (_err) {
+      // Local fallback
+      const updated = orders.map(o => o.id === id ? { ...o, order_status: newStatus } : o);
+      setOrders(updated);
+      localStorage.setItem("glazy_orders", JSON.stringify(updated));
     }
+    fetchData();
   };
 
   // --- Payment Verification ---
@@ -184,17 +310,42 @@ function AdminDashboard() {
         },
         body: JSON.stringify({ action, admin_notes: adminNotes || undefined }),
       });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || "Failed to update payment");
-      }
-      fetchData();
-    } catch (err) {
-      alert(err.message);
+      if (!res.ok) throw new Error("Failed to update payment");
+    } catch (_err) {
+      // Local fallback
+      const newStatus = action === "verify" ? "Verified" : "Rejected";
+      const newOrderStatus = action === "verify" ? "Confirmed" : "Pending Payment";
+
+      const updatedPayments = payments.map(p => {
+        if (p.id === paymentId) {
+          return {
+            ...p,
+            status: newStatus,
+            order_status: newOrderStatus,
+            verified_at: new Date().toISOString(),
+            admin_notes: adminNotes || p.admin_notes
+          };
+        }
+        return p;
+      });
+
+      const updatedOrders = orders.map(o => {
+        const matchingP = updatedPayments.find(p => p.order_id === o.id || p.order_number === o.order_number);
+        if (matchingP) {
+          return { ...o, payment_status: matchingP.status, order_status: matchingP.order_status };
+        }
+        return o;
+      });
+
+      setPayments(updatedPayments);
+      setOrders(updatedOrders);
+      localStorage.setItem("glazy_payments", JSON.stringify(updatedPayments));
+      localStorage.setItem("glazy_orders", JSON.stringify(updatedOrders));
     }
+    fetchData();
   };
 
-  if (loading) return <div style={{ padding: "40px", textAlign: "center" }}>Loading admin dashboard...</div>;
+  if (loading) return <div style={{ padding: "40px", textAlign: "center", color: "#5b2d1c", fontSize: "16px" }}>Loading admin dashboard...</div>;
 
   return (
     <div className="admin-container" style={{ display: "flex", minHeight: "100vh", background: "#fffaf6", width: "100%" }}>

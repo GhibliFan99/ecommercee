@@ -15,7 +15,38 @@ function Receipt() {
         }
         setReceipt(data);
       })
-      .catch((err) => setError(err.message || "Unable to load receipt."));
+      .catch((err) => {
+        // Fallback to localStorage for Vercel / offline mode
+        try {
+          const cached = localStorage.getItem(`glazy_receipt_${orderNumber}`);
+          if (cached) {
+            setReceipt(JSON.parse(cached));
+            return;
+          }
+          const savedOrders = JSON.parse(localStorage.getItem("glazy_orders") || "[]");
+          const found = savedOrders.find((o) => o.order_number === orderNumber || o.orderNumber === orderNumber);
+          if (found) {
+            setReceipt({
+              orderNumber: found.order_number || found.orderNumber,
+              orderDate: found.created_at || new Date().toISOString(),
+              storeName: "Glazy Days - Donut Shop",
+              pickupDate: found.pickup_date || "Today",
+              pickupTime: found.pickup_time || "12:00 PM",
+              paymentMethod: found.payment_method || "GCash",
+              paymentStatus: found.payment_status || "Pending Verification",
+              orderStatus: found.status || "Pending Payment",
+              paymentReference: found.payment_reference || "N/A",
+              pickupInstructions: "Please present this receipt upon pickup at our counter.",
+              items: found.items || [],
+              totalAmount: found.total_amount || 0,
+            });
+            return;
+          }
+        } catch (e) {
+          console.error(e);
+        }
+        setError(err.message || "Unable to load receipt.");
+      });
   }, [orderNumber]);
 
   if (error) {
