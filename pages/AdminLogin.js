@@ -30,36 +30,27 @@ function AdminLogin() {
     setLoading(true);
 
     try {
-      const response = await fetch("http://localhost:3001/api/admin/login", {
+      const response = await fetch("/api/admin/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ username: cleanUser, password: cleanPass }),
       });
 
+      const data = await response.json().catch(() => ({}));
+
       if (response.ok) {
-        const data = await response.json();
-        localStorage.setItem("glazy_admin_token", data.token);
+        if (data.token) {
+          localStorage.setItem("glazy_admin_token", data.token);
+        }
         localStorage.setItem("glazy_admin_user", JSON.stringify(data.admin || { username: cleanUser }));
         navigate("/admin/dashboard");
         return;
       }
-      
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data.message || "Invalid username or password.");
-    } catch (err) {
-      // Fallback for Vercel / Cloud Demo when local backend server is offline:
-      if (
-        (cleanUser === "grace@glazydays.com" || cleanUser === "grace123" || cleanUser === "grace" || cleanUser === "admin") &&
-        (cleanPass === "grace123" || cleanPass === "admin123")
-      ) {
-        const demoToken = "demo-admin-token-" + Date.now();
-        localStorage.setItem("glazy_admin_token", demoToken);
-        localStorage.setItem("glazy_admin_user", JSON.stringify({ username: "grace@glazydays.com", email: "grace@glazydays.com" }));
-        navigate("/admin/dashboard");
-        return;
-      }
 
-      setError("Invalid username or password.");
+      setError(data.message || "Invalid credentials.");
+    } catch (err) {
+      setError("Unable to connect to the server. Please check your connection.");
     } finally {
       setLoading(false);
     }

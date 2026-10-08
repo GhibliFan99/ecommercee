@@ -84,27 +84,18 @@ export default function CustomerAccountModal() {
     if (!token) return;
     setOrdersLoading(true);
     try {
-      const res = await fetch("http://localhost:3001/api/customers/orders", {
+      const res = await fetch("/api/customers/orders", {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
         setOrders(data);
-        return;
+      } else {
+        setOrders([]);
       }
     } catch (e) {
-      console.warn("Backend offline, loading customer orders from localStorage:", e);
-    }
-    // Fallback: load matching orders from localStorage
-    try {
-      const allOrders = JSON.parse(localStorage.getItem("glazy_orders") || "[]");
-      const userEmail = customer?.email?.toLowerCase();
-      const myOrders = allOrders.filter(
-        (o) => o.customer_email?.toLowerCase() === userEmail || o.email?.toLowerCase() === userEmail
-      );
-      setOrders(myOrders);
-    } catch (err) {
-      console.error(err);
+      console.error("Failed to load customer orders:", e);
+      setOrders([]);
     } finally {
       setOrdersLoading(false);
     }
@@ -128,7 +119,7 @@ export default function CustomerAccountModal() {
 
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:3001/api/customers/register", {
+      const res = await fetch("/api/customers/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -152,28 +143,7 @@ export default function CustomerAccountModal() {
         closeAccountModal();
       }, 1500);
     } catch (err) {
-      // Vercel / offline fallback
-      const mockCustomer = {
-        id: Date.now(),
-        fullName: registerData.fullName.trim(),
-        full_name: registerData.fullName.trim(),
-        email: registerData.email.trim(),
-        contactNumber: registerData.contactNumber.trim(),
-        contact_number: registerData.contactNumber.trim(),
-        address: registerData.address.trim(),
-        created_at: new Date().toISOString(),
-      };
-      // Save to offline registered customers
-      const registeredList = JSON.parse(localStorage.getItem("glazy_registered_customers") || "[]");
-      registeredList.push({ ...mockCustomer, password: registerData.password });
-      localStorage.setItem("glazy_registered_customers", JSON.stringify(registeredList));
-
-      loginCustomer(`cust_${Date.now()}`, mockCustomer);
-      setSuccess("Account created successfully! Welcome to Glazy Days 🍩");
-      setTimeout(() => {
-        setSuccess("");
-        closeAccountModal();
-      }, 1500);
+      setError(err.message || "Registration failed. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -189,7 +159,7 @@ export default function CustomerAccountModal() {
 
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:3001/api/customers/login", {
+      const res = await fetch("/api/customers/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -210,41 +180,7 @@ export default function CustomerAccountModal() {
         closeAccountModal();
       }, 1200);
     } catch (err) {
-      // Vercel / offline fallback
-      const registeredList = JSON.parse(localStorage.getItem("glazy_registered_customers") || "[]");
-      const matched = registeredList.find(
-        (c) => c.email.toLowerCase() === loginData.email.trim().toLowerCase()
-      );
-
-      if (matched) {
-        if (matched.password && matched.password !== loginData.password) {
-          setError("Invalid email or password.");
-          setLoading(false);
-          return;
-        }
-        loginCustomer(`cust_${Date.now()}`, matched);
-        setSuccess("Logged in successfully! 🍩");
-        setTimeout(() => {
-          setSuccess("");
-          closeAccountModal();
-        }, 1200);
-      } else {
-        // Allow demo login
-        const demoCustomer = {
-          id: Date.now(),
-          fullName: loginData.email.split("@")[0],
-          full_name: loginData.email.split("@")[0],
-          email: loginData.email.trim(),
-          contactNumber: "09123456789",
-          address: "Metro Manila, Philippines",
-        };
-        loginCustomer(`cust_${Date.now()}`, demoCustomer);
-        setSuccess("Logged in successfully! 🍩");
-        setTimeout(() => {
-          setSuccess("");
-          closeAccountModal();
-        }, 1200);
-      }
+      setError(err.message || "Invalid email or password.");
     } finally {
       setLoading(false);
     }
@@ -257,7 +193,7 @@ export default function CustomerAccountModal() {
 
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:3001/api/customers/me", {
+      const res = await fetch("/api/customers/me", {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -279,16 +215,7 @@ export default function CustomerAccountModal() {
       setSuccess("Delivery details updated successfully! 🎉");
       setTimeout(() => setSuccess(""), 3000);
     } catch (err) {
-      // Local fallback
-      updateCustomerData({
-        fullName: profileData.fullName,
-        full_name: profileData.fullName,
-        contactNumber: profileData.contactNumber,
-        contact_number: profileData.contactNumber,
-        address: profileData.address,
-      });
-      setSuccess("Delivery details updated successfully! 🎉");
-      setTimeout(() => setSuccess(""), 3000);
+      setError(err.message || "Failed to update profile.");
     } finally {
       setLoading(false);
     }

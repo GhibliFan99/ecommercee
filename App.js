@@ -9,6 +9,7 @@ import AdminDashboard from "./pages/AdminDashboard";
 import Receipt from "./pages/Receipt";
 import { CustomerProvider } from "./components/CustomerContext";
 import CustomerAccountModal from "./components/CustomerAccountModal";
+import { AdminRoute } from "./components/AdminRoute";
 import "./styles/App.css";
 
 function App() {
@@ -17,7 +18,7 @@ function App() {
   const [toast, setToast] = useState("Added to cart!");
 
   useEffect(() => {
-    fetch("http://localhost:3001/api/products")
+    fetch("/api/products")
       .then((response) => response.json())
       .then((data) => setProducts(data))
       .catch(() => setProducts([]));
@@ -109,7 +110,14 @@ function App() {
           />
 
           <Route path="/admin/login" element={<AdminLogin />} />
-          <Route path="/admin/dashboard" element={<AdminDashboard />} />
+          <Route
+            path="/admin/dashboard"
+            element={
+              <AdminRoute>
+                <AdminDashboard />
+              </AdminRoute>
+            }
+          />
           <Route path="/receipt/:orderNumber" element={<Receipt />} />
         </Routes>
       </Router>

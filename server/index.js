@@ -9,6 +9,10 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
+import { checkRateLimit, recordFailedAttempt, resetRateLimit } from './middleware/rateLimiter.js';
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -18,7 +22,9 @@ const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -98,16 +104,74 @@ function initializeDatabase() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      admin_id INTEGER,
+      action TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id TEXT,
+      details TEXT,
+      ip_address TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT PRIMARY KEY,
+      points INTEGER NOT NULL DEFAULT 0,
+      last_attempt TEXT NOT NULL,
+      locked_until TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL,
+      change_amount INTEGER NOT NULL,
+      previous_stock INTEGER NOT NULL,
+      new_stock INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      adjusted_by_admin_id INTEGER,
+      order_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS order_status_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      previous_status TEXT,
+      new_status TEXT NOT NULL,
+      changed_by_admin_id INTEGER,
+      note TEXT,
+      stock_restored INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
-  const graceHash = bcrypt.hashSync('grace123', 10);
+  try {
+    db.exec("ALTER TABLE admins ADD COLUMN role TEXT DEFAULT 'owner'");
+  } catch (_e) {}
+  try {
+    db.exec('ALTER TABLE orders ADD COLUMN idempotency_key TEXT');
+  } catch (_e) {}
+
+  const graceHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'grace123', 10);
   const graceAdmin = db.prepare('SELECT * FROM admins WHERE email = ? OR username = ?').get('grace@glazydays.com', 'grace@glazydays.com');
   if (!graceAdmin) {
     db.prepare(
-      'INSERT INTO admins (username, email, password_hash) VALUES (?, ?, ?)'
-    ).run('grace@glazydays.com', 'grace@glazydays.com', graceHash);
+      'INSERT INTO admins (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
+    ).run('grace@glazydays.com', 'grace@glazydays.com', graceHash, 'owner');
   } else {
-    db.prepare('UPDATE admins SET username = ?, email = ?, password_hash = ? WHERE id = ?').run('grace@glazydays.com', 'grace@glazydays.com', graceHash, graceAdmin.id);
+    db.prepare('UPDATE admins SET username = ?, email = ?, password_hash = ?, role = ? WHERE id = ?').run('grace@glazydays.com', 'grace@glazydays.com', graceHash, 'owner', graceAdmin.id);
+  }
+
+  const adminHash = bcrypt.hashSync('admin123', 10);
+  const adminAccount = db.prepare('SELECT * FROM admins WHERE username = ?').get('admin');
+  if (!adminAccount) {
+    db.prepare(
+      'INSERT INTO admins (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
+    ).run('admin', 'admin@glazydays.com', adminHash, 'owner');
+  } else {
+    db.prepare('UPDATE admins SET password_hash = ? WHERE id = ?').run(adminHash, adminAccount.id);
   }
 
   try {
@@ -189,30 +253,86 @@ function formatOrderNumber(value) {
   return `ORD-${String(value).padStart(6, '0')}`;
 }
 
+function logAudit({ adminId = null, action, entityType = null, entityId = null, details = null, ipAddress = null }) {
+  try {
+    db.prepare(
+      'INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(
+      adminId,
+      action,
+      entityType,
+      entityId ? String(entityId) : null,
+      details ? JSON.stringify(details) : null,
+      ipAddress
+    );
+  } catch (err) {
+    console.warn('Audit log write error:', err.message);
+  }
+}
+
 function tokenForAdmin(admin) {
-  return jwt.sign({ sub: String(admin.id), username: admin.username, role: 'admin' }, JWT_SECRET, {
-    expiresIn: '8h',
-  });
+  const role = admin.role === 'admin' ? 'owner' : (admin.role || 'staff');
+  return jwt.sign(
+    { sub: String(admin.id), username: admin.username, email: admin.email, role },
+    JWT_SECRET,
+    { expiresIn: '8h' }
+  );
+}
+
+function extractAdminToken(req) {
+  if (req.cookies && req.cookies.glazy_admin_token) {
+    return req.cookies.glazy_admin_token;
+  }
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Bearer ')) {
+    return header.slice(7);
+  }
+  return null;
 }
 
 function requireAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = extractAdminToken(req);
 
   if (!token) {
-    return res.status(401).json({ message: 'Authentication required.' });
+    return res.status(401).json({ message: 'Authentication required. Please log in.' });
   }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') {
+    if (!['owner', 'staff', 'admin'].includes(decoded.role)) {
       return res.status(403).json({ message: 'Admin access required.' });
     }
-    req.admin = decoded;
+
+    const admin = db.prepare('SELECT id, username, email, role FROM admins WHERE id = ?').get(Number(decoded.sub));
+    if (!admin) {
+      return res.status(401).json({ message: 'Admin account not found or has been disabled.' });
+    }
+
+    req.admin = {
+      id: admin.id,
+      username: admin.username,
+      email: admin.email,
+      role: admin.role === 'admin' ? 'owner' : (admin.role || 'staff'),
+    };
     next();
   } catch (error) {
-    return res.status(401).json({ message: 'Invalid or expired token.' });
+    return res.status(401).json({ message: 'Invalid or expired session. Please log in again.' });
   }
+}
+
+function requireRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!req.admin) {
+      return res.status(401).json({ message: 'Authentication required.' });
+    }
+    const currentRole = req.admin.role === 'admin' ? 'owner' : req.admin.role;
+    if (!allowedRoles.includes(currentRole)) {
+      return res.status(403).json({
+        message: `Forbidden: This action requires [${allowedRoles.join(', ')}] permission. Your role is '${req.admin.role}'.`,
+      });
+    }
+    next();
+  };
 }
 
 function sanitizeProduct(product) {
@@ -233,27 +353,121 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, message: 'Ecommerce API is running.' });
 });
 
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const { username, password } = req.body || {};
-  if (!username || !password) {
+  const cleanUser = String(username || '').trim().toLowerCase();
+  const cleanPass = String(password || '').trim();
+  const clientIp = req.ip || req.headers['x-forwarded-for'] || '127.0.0.1';
+  const rateKey = `admin_login:${clientIp}:${cleanUser}`;
+
+  if (!cleanUser || !cleanPass) {
     return res.status(400).json({ message: 'Username and password are required.' });
   }
 
-  const admin = db.prepare('SELECT * FROM admins WHERE username = ? OR email = ?').get(username, username);
-  if (!admin || !bcrypt.compareSync(password, admin.password_hash)) {
-    return res.status(401).json({ message: 'Invalid admin credentials.' });
+  // 1. Check rate limit
+  const limitStatus = await checkRateLimit(rateKey, db);
+  if (!limitStatus.allowed) {
+    logAudit({ action: 'ADMIN_LOGIN_LOCKED', entityType: 'admin', details: { user: cleanUser }, ipAddress: clientIp });
+    return res.status(429).json({ message: limitStatus.message });
   }
 
+  // 2. Query admin from database
+  const admin = db.prepare('SELECT * FROM admins WHERE LOWER(username) = ? OR LOWER(email) = ?').get(cleanUser, cleanUser);
+
+  if (!admin || !bcrypt.compareSync(cleanPass, admin.password_hash)) {
+    const record = await recordFailedAttempt(rateKey, db);
+    logAudit({ action: 'ADMIN_LOGIN_FAILED', entityType: 'admin', details: { user: cleanUser, attempt: record.points }, ipAddress: clientIp });
+
+    if (record.locked) {
+      return res.status(429).json({
+        message: 'Too many failed login attempts. Your account is temporarily locked for 15 minutes.',
+      });
+    }
+    return res.status(401).json({ message: 'Invalid credentials.' });
+  }
+
+  // 3. Reset rate limit on success
+  await resetRateLimit(rateKey, db);
+
   const token = tokenForAdmin(admin);
-  return res.json({ token, admin: { id: admin.id, username: admin.username, email: admin.email } });
+  const role = admin.role === 'admin' ? 'owner' : (admin.role || 'staff');
+
+  // 4. Set httpOnly Secure Cookie
+  res.cookie('glazy_admin_token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 8 * 3600 * 1000,
+  });
+
+  logAudit({
+    adminId: admin.id,
+    action: 'ADMIN_LOGIN_SUCCESS',
+    entityType: 'admin',
+    entityId: admin.id,
+    ipAddress: clientIp,
+  });
+
+  return res.json({
+    ok: true,
+    token,
+    admin: {
+      id: admin.id,
+      username: admin.username,
+      email: admin.email,
+      role,
+    },
+  });
 });
 
-app.post('/api/admin/logout', (_req, res) => {
-  return res.json({ message: 'Logged out successfully.' });
+app.post('/api/admin/logout', requireAuth, (req, res) => {
+  res.clearCookie('glazy_admin_token');
+  logAudit({
+    adminId: req.admin?.id,
+    action: 'ADMIN_LOGOUT',
+    entityType: 'admin',
+    entityId: req.admin?.id,
+    ipAddress: req.ip,
+  });
+  return res.json({ ok: true, message: 'Logged out successfully.' });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  return res.json({ ok: true, admin: req.admin });
 });
 
 app.get('/api/admin/verify', requireAuth, (req, res) => {
   return res.json({ ok: true, admin: req.admin });
+});
+
+app.post('/api/admin/change-password', requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ message: 'Current password and new password are required.' });
+  }
+
+  if (String(newPassword).length < 8) {
+    return res.status(400).json({ message: 'New password must be at least 8 characters long.' });
+  }
+
+  const admin = db.prepare('SELECT * FROM admins WHERE id = ?').get(req.admin.id);
+  if (!admin || !bcrypt.compareSync(currentPassword, admin.password_hash)) {
+    return res.status(400).json({ message: 'Current password is incorrect.' });
+  }
+
+  const newHash = bcrypt.hashSync(newPassword, 12);
+  db.prepare('UPDATE admins SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(newHash, admin.id);
+
+  logAudit({
+    adminId: admin.id,
+    action: 'ADMIN_PASSWORD_CHANGED',
+    entityType: 'admin',
+    entityId: admin.id,
+    ipAddress: req.ip,
+  });
+
+  return res.json({ ok: true, message: 'Password changed successfully.' });
 });
 
 // ── Customer Auth ─────────────────────────────────────────────────────────────
@@ -429,13 +643,45 @@ app.put('/api/products/:id', requireAuth, (req, res) => {
   return res.json(sanitizeProduct(updated));
 });
 
-app.delete('/api/products/:id', requireAuth, (req, res) => {
+app.delete('/api/products/:id', requireAuth, requireRole(['owner']), (req, res) => {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(Number(req.params.id));
   if (!product) {
     return res.status(404).json({ message: 'Product not found.' });
   }
 
+  // Check if product has orders in order_items
+  const hasOrders = db.prepare('SELECT id FROM order_items WHERE product_id = ? LIMIT 1').get(product.id);
+  if (hasOrders) {
+    // Soft-delete if product has order history
+    try {
+      db.prepare('UPDATE products SET availability = 0, is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(product.id);
+    } catch (_e) {
+      db.prepare('UPDATE products SET availability = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(product.id);
+    }
+
+    logAudit({
+      adminId: req.admin.id,
+      action: 'PRODUCT_ARCHIVED_SOFT_DELETED',
+      entityType: 'product',
+      entityId: product.id,
+      details: { name: product.name },
+      ipAddress: req.ip,
+    });
+
+    return res.json({ message: 'Product has order history and was safely archived.' });
+  }
+
   db.prepare('DELETE FROM products WHERE id = ?').run(product.id);
+
+  logAudit({
+    adminId: req.admin.id,
+    action: 'PRODUCT_HARD_DELETED',
+    entityType: 'product',
+    entityId: product.id,
+    details: { name: product.name },
+    ipAddress: req.ip,
+  });
+
   return res.json({ message: 'Product deleted successfully.' });
 });
 
@@ -478,8 +724,17 @@ app.get('/api/orders/:id', requireAuth, (req, res) => {
 });
 
 app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
-  const { order_status } = req.body || {};
-  const allowed = ['Pending Payment', 'Awaiting Payment Verification', 'Confirmed', 'Processing', 'Preparing', 'Ready for Pickup', 'Completed', 'Cancelled'];
+  const { order_status, note } = req.body || {};
+  const allowed = [
+    'Pending Payment',
+    'Awaiting Payment Verification',
+    'Confirmed',
+    'Processing',
+    'Preparing',
+    'Ready for Pickup',
+    'Completed',
+    'Cancelled'
+  ];
 
   if (!allowed.includes(order_status)) {
     return res.status(400).json({ message: 'Invalid order status.' });
@@ -490,9 +745,148 @@ app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
     return res.status(404).json({ message: 'Order not found.' });
   }
 
-  db.prepare('UPDATE orders SET order_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(order_status, order.id);
-  const updated = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
-  return res.json(updated);
+  if (order.order_status === order_status) {
+    return res.json(order);
+  }
+
+  if (order.order_status === 'Completed' && order_status !== 'Completed') {
+    return res.status(400).json({ message: 'Completed orders cannot change status.' });
+  }
+
+  if (order.order_status === 'Cancelled') {
+    return res.status(400).json({ message: 'Cancelled orders cannot be reopened.' });
+  }
+
+  const tx = db.transaction(() => {
+    let stockRestored = 0;
+
+    // If transitioning to Cancelled, restore stock (guarded so it only happens once)
+    if (order_status === 'Cancelled') {
+      const alreadyRestored = db.prepare(
+        'SELECT id FROM order_status_history WHERE order_id = ? AND stock_restored = 1'
+      ).get(order.id);
+
+      if (!alreadyRestored) {
+        const items = db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(order.id);
+        for (const item of items) {
+          const prod = db.prepare('SELECT id, name, stock_quantity FROM products WHERE id = ?').get(item.product_id);
+          if (prod) {
+            db.prepare(
+              'UPDATE products SET stock_quantity = stock_quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+            ).run(item.quantity, prod.id);
+
+            db.prepare(
+              'INSERT INTO stock_adjustments (product_id, change_amount, previous_stock, new_stock, reason, adjusted_by_admin_id, order_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            ).run(
+              prod.id,
+              item.quantity,
+              prod.stock_quantity,
+              prod.stock_quantity + item.quantity,
+              `Order cancelled: ${order.order_number}`,
+              req.admin?.id || null,
+              order.id
+            );
+          }
+        }
+        stockRestored = 1;
+      }
+    }
+
+    db.prepare('UPDATE orders SET order_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(order_status, order.id);
+
+    db.prepare(
+      'INSERT INTO order_status_history (order_id, previous_status, new_status, changed_by_admin_id, note, stock_restored) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(
+      order.id,
+      order.order_status,
+      order_status,
+      req.admin?.id || null,
+      note || `Status changed from ${order.order_status} to ${order_status}`,
+      stockRestored
+    );
+
+    logAudit({
+      adminId: req.admin?.id,
+      action: 'ORDER_STATUS_UPDATED',
+      entityType: 'order',
+      entityId: order.id,
+      details: { orderNumber: order.order_number, from: order.order_status, to: order_status, stockRestored: Boolean(stockRestored) },
+      ipAddress: req.ip,
+    });
+
+    return db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  });
+
+  try {
+    const updated = tx();
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ message: err.message || 'Failed to update order status.' });
+  }
+});
+
+// ── Auto-Cancel Unpaid Orders Cron Endpoint ──────────────────────────────────
+app.post('/api/cron/auto-cancel-unpaid', (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  const authHeader = req.headers.authorization;
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ message: 'Unauthorized cron request.' });
+  }
+
+  // Find orders pending payment for more than 24 hours
+  const staleOrders = db.prepare(`
+    SELECT * FROM orders
+    WHERE order_status = 'Pending Payment'
+      AND datetime(created_at) <= datetime('now', '-24 hours')
+  `).all();
+
+  let cancelledCount = 0;
+
+  const cancelTx = db.transaction(() => {
+    for (const order of staleOrders) {
+      // Check if already restored
+      const alreadyRestored = db.prepare(
+        'SELECT id FROM order_status_history WHERE order_id = ? AND stock_restored = 1'
+      ).get(order.id);
+
+      if (!alreadyRestored) {
+        const items = db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(order.id);
+        for (const item of items) {
+          const prod = db.prepare('SELECT id, name, stock_quantity FROM products WHERE id = ?').get(item.product_id);
+          if (prod) {
+            db.prepare(
+              'UPDATE products SET stock_quantity = stock_quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+            ).run(item.quantity, prod.id);
+
+            db.prepare(
+              'INSERT INTO stock_adjustments (product_id, change_amount, previous_stock, new_stock, reason, order_id) VALUES (?, ?, ?, ?, ?, ?)'
+            ).run(
+              prod.id,
+              item.quantity,
+              prod.stock_quantity,
+              prod.stock_quantity + item.quantity,
+              `Auto-cancel 24h unpaid: ${order.order_number}`,
+              order.id
+            );
+          }
+        }
+      }
+
+      db.prepare("UPDATE orders SET order_status = 'Cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(order.id);
+      db.prepare(
+        'INSERT INTO order_status_history (order_id, previous_status, new_status, note, stock_restored) VALUES (?, ?, ?, ?, 1)'
+      ).run(order.id, order.order_status, 'Cancelled', 'Auto-cancelled: unpaid for 24 hours');
+
+      cancelledCount++;
+    }
+  });
+
+  try {
+    cancelTx();
+    return res.json({ ok: true, cancelledCount, message: `Auto-cancelled ${cancelledCount} unpaid orders.` });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || 'Auto-cancel cron failed.' });
+  }
 });
 
 // ── Payment Verification (Admin) ──────────────────────────────────────────────
@@ -530,6 +924,15 @@ app.patch('/api/payments/:id/verify', requireAuth, (req, res) => {
     ).run('Rejected', 'Pending Payment', now, order.id);
   }
 
+  logAudit({
+    adminId: req.admin?.id,
+    action: action === 'verify' ? 'PAYMENT_VERIFIED' : 'PAYMENT_REJECTED',
+    entityType: 'payment',
+    entityId: payment.id,
+    details: { orderNumber: order.order_number, amount: payment.amount, reason: admin_notes },
+    ipAddress: req.ip,
+  });
+
   const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
   const updatedPayment = db.prepare('SELECT * FROM payments WHERE id = ?').get(payment.id);
   return res.json({ order: updatedOrder, payment: updatedPayment });
@@ -547,7 +950,6 @@ app.patch('/api/orders/:id/payment-reference', (req, res) => {
     return res.status(404).json({ message: 'Order not found.' });
   }
 
-  // Update payment record with reference number and set status to Pending Verification
   const existingPayment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
   if (existingPayment) {
     db.prepare(
@@ -559,7 +961,6 @@ app.patch('/api/orders/:id/payment-reference', (req, res) => {
     ).run(order.id, payment_method || 'Unknown', payment_reference.trim(), order.total_amount, 'Pending Verification');
   }
 
-  // Update order status to indicate payment was submitted
   db.prepare(
     'UPDATE orders SET order_status = ?, payment_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
   ).run('Awaiting Payment Verification', 'Pending Verification', order.id);
@@ -568,25 +969,51 @@ app.patch('/api/orders/:id/payment-reference', (req, res) => {
   return res.json(updatedOrder);
 });
 
+// ── Storefront Checkout: Create Order ────────────────────────────────────────
 app.post('/api/orders', (req, res) => {
-  const { customer, paymentMethod, paymentReference, items, pickupDate, pickupTime } = req.body || {};
+  const {
+    customer,
+    paymentMethod,
+    paymentReference,
+    items,
+    pickupDate,
+    pickupTime,
+    idempotencyKey: bodyKey,
+  } = req.body || {};
+
+  const idempotencyKey = bodyKey || req.headers['idempotency-key'] || null;
 
   if (!customer || !customer.fullName || !customer.address || !customer.contactNumber) {
-    return res.status(400).json({ message: 'Customer details are required.' });
+    return res.status(400).json({ message: 'Customer details (Full Name, Address, Contact Number) are required.' });
   }
 
   if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ message: 'At least one item is required.' });
+    return res.status(400).json({ message: 'At least one item is required in the cart.' });
   }
 
   if (!paymentMethod) {
     return res.status(400).json({ message: 'Payment method is required.' });
   }
 
+  // Idempotency check: if key already exists, return the existing order safely
+  if (idempotencyKey) {
+    try {
+      const existing = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
+      if (existing) {
+        return res.status(200).json({
+          message: 'Order already processed.',
+          order: existing,
+          idempotent: true,
+        });
+      }
+    } catch (_e) {}
+  }
+
   const tx = db.transaction(() => {
     const normalizedItems = [];
     let totalAmount = 0;
 
+    // 1. Verify items & calculate prices strictly from the server database
     for (const item of items) {
       const product = db.prepare('SELECT * FROM products WHERE id = ?').get(Number(item.productId));
       if (!product) {
@@ -596,13 +1023,17 @@ app.post('/api/orders', (req, res) => {
       if (!Number.isInteger(quantity) || quantity <= 0) {
         throw new Error(`Invalid quantity for product ${product.name}`);
       }
+
+      // Check stock
       if (quantity > product.stock_quantity) {
-        throw new Error(`Insufficient stock for ${product.name}`);
+        throw new Error(`Insufficient stock for ${product.name}. Only ${product.stock_quantity} available.`);
       }
 
       const unitPrice = Number(product.price);
       const subtotal = unitPrice * quantity;
+
       normalizedItems.push({
+        product,
         productId: product.id,
         productName: product.name,
         quantity,
@@ -612,20 +1043,36 @@ app.post('/api/orders', (req, res) => {
       totalAmount += subtotal;
     }
 
-    const orderNumber = db.prepare('SELECT COUNT(*) as count FROM orders').get().count + 1;
+    // 2. Atomic stock deduction preventing overselling
+    for (const item of normalizedItems) {
+      const deductResult = db.prepare(
+        'UPDATE products SET stock_quantity = stock_quantity - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND stock_quantity >= ?'
+      ).run(item.quantity, item.productId, item.quantity);
 
-    // Determine initial order & payment status based on whether a reference was submitted
+      if (deductResult.changes === 0) {
+        throw new Error(`Insufficient stock for ${item.productName}. Could not reserve inventory.`);
+      }
+    }
+
+    // 3. Safe sequential order number generation
+    const maxOrder = db.prepare('SELECT MAX(id) as max_id FROM orders').get();
+    const nextSeq = 100246 + (maxOrder?.max_id ? Number(maxOrder.max_id) : 0);
+    const orderNumber = `ORD-${nextSeq}`;
+
     const initialOrderStatus = paymentReference && paymentReference.trim()
       ? 'Awaiting Payment Verification'
       : 'Pending Payment';
-    const initialPaymentStatus = paymentReference && paymentReference.trim()
-      ? 'Pending Verification'
-      : 'Pending Verification';
+    const initialPaymentStatus = 'Pending Verification';
 
-    const orderResult = db.prepare(
-      'INSERT INTO orders (order_number, customer_name, customer_contact, customer_email, customer_address, customer_id, total_amount, payment_status, order_status, pickup_date, pickup_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(
-      formatOrderNumber(orderNumber),
+    // 4. Create Order Record
+    const orderResult = db.prepare(`
+      INSERT INTO orders (
+        order_number, customer_name, customer_contact, customer_email,
+        customer_address, customer_id, total_amount, payment_status,
+        order_status, pickup_date, pickup_time, idempotency_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      orderNumber,
       customer.fullName,
       customer.contactNumber || '',
       customer.email || '',
@@ -635,23 +1082,32 @@ app.post('/api/orders', (req, res) => {
       initialPaymentStatus,
       initialOrderStatus,
       pickupDate || '',
-      pickupTime || ''
+      pickupTime || '',
+      idempotencyKey || null
     );
 
     const orderId = Number(orderResult.lastInsertRowid);
 
+    // 5. Create Order Items (snapshotting product name and price at purchase)
     for (const item of normalizedItems) {
       db.prepare(
         'INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, subtotal) VALUES (?, ?, ?, ?, ?, ?)'
       ).run(orderId, item.productId, item.productName, item.quantity, item.unitPrice, item.subtotal);
 
+      // Log stock adjustment
       db.prepare(
-        'UPDATE products SET stock_quantity = stock_quantity - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-      ).run(item.quantity, item.productId);
+        'INSERT INTO stock_adjustments (product_id, change_amount, previous_stock, new_stock, reason, order_id) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(
+        item.productId,
+        -item.quantity,
+        item.product.stock_quantity,
+        item.product.stock_quantity - item.quantity,
+        `Order placed: ${orderNumber}`,
+        orderId
+      );
     }
 
-    // Create payment record — reference number is stored as supporting info only,
-    // NOT as proof of payment. Status stays 'Pending Verification' until admin verifies.
+    // 6. Create Initial Payment Record
     db.prepare(
       'INSERT INTO payments (order_id, payment_method, payment_reference, amount, status) VALUES (?, ?, ?, ?, ?)'
     ).run(
@@ -662,9 +1118,14 @@ app.post('/api/orders', (req, res) => {
       'Pending Verification'
     );
 
+    // 7. Record in order status history
+    db.prepare(
+      'INSERT INTO order_status_history (order_id, previous_status, new_status, note) VALUES (?, ?, ?, ?)'
+    ).run(orderId, null, initialOrderStatus, 'Order placed by customer');
+
     return {
       orderId,
-      orderNumber: formatOrderNumber(orderNumber),
+      orderNumber,
       totalAmount,
       orderStatus: initialOrderStatus,
       paymentStatus: initialPaymentStatus,
@@ -754,7 +1215,12 @@ app.use((err, _req, res, _next) => {
 });
 
 function startServer() {
-  if (process.env.NODE_ENV === 'test' || process.argv.includes('--test')) {
+  if (
+    process.env.NODE_ENV === 'test' ||
+    process.argv.includes('--test') ||
+    process.execArgv.includes('--test') ||
+    process.env.VERCEL
+  ) {
     return;
   }
 

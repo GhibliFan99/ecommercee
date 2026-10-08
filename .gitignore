@@ -19,6 +19,9 @@ lerna-debug.log*
 .env
 .env.local
 .env.production
+.env.preview
+.env.*.local
+!.env.example
 
 # Database & SQLite files
 server/*.sqlite
@@ -26,6 +29,8 @@ server/*.sqlite-shm
 server/*.sqlite-wal
 *.db
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # OS and Editor files
 .DS_Store
