@@ -48,7 +48,10 @@ function AdminLogin() {
         return;
       }
 
-      setError(data.message || "Invalid credentials.");
+      setError(
+        data.message ||
+        (response.status === 401 ? "Invalid credentials." : `Server error (${response.status}). Please try again.`)
+      );
     } catch (err) {
       setError("Unable to connect to the server. Please check your connection.");
     } finally {
