@@ -47,6 +47,12 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
   const [confirmInput, setConfirmInput] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
+  // Ready / Unclaimed orders and Claim QR verification
+  const [claimModal, setClaimModal] = useState(null); // { order } or true
+  const [claimInput, setClaimInput] = useState("");
+  const [claimError, setClaimError] = useState("");
+  const [nowTime, setNowTime] = useState(Date.now());
+
   // Admin password change modal state
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
@@ -56,7 +62,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
   const token = localStorage.getItem("glazy_admin_token");
   const currentAdmin = propAdmin || JSON.parse(localStorage.getItem("glazy_admin_user") || "null") || { username: "Admin", role: "owner" };
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 3500); };
 
   const fetchData = useCallback(async (isSilent = false) => {
     if (!isSilent) setLoading(true);
@@ -102,7 +108,13 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
     const interval = setInterval(() => {
       fetchData(true);
     }, 15000);
-    return () => clearInterval(interval);
+    const ticker = setInterval(() => {
+      setNowTime(Date.now());
+    }, 1000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(ticker);
+    };
   }, [fetchData]);
 
   const totalSales = orders.filter(o => o.payment_status === "Verified" || o.order_status === "Confirmed" || o.order_status === "Completed").reduce((s, o) => s + Number(o.total_amount || 0), 0);
@@ -111,6 +123,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
   const completedCount = orders.filter(o => o.order_status === "Completed").length;
   const cancelledCount = orders.filter(o => o.order_status === "Cancelled").length;
   const lowStockCount = products.filter(p => Number(p.stock_quantity ?? 0) <= 5).length;
+  const unclaimedOrders = orders.filter(o => o.order_status === "Ready for Pickup");
 
   const handleVerifyPayment = (paymentId, action) => {
     const isVerify = action === "verify";
@@ -150,7 +163,51 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
     });
   };
 
-  const handleUpdateOrderStatus = async (id, newStatus) => {
+  const handleCallNumber = async (orderId, queueNumber) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/call`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to call number.");
+      }
+      showToast(`📢 Called Queue ${queueNumber || 'number'}! Store board updated.`);
+      await fetchData(true);
+    } catch (err) {
+      showToast(err.message || "Could not call queue number.");
+    }
+  };
+
+  const handleVerifyClaim = async ({ orderNumber, trackingToken, qrData }) => {
+    setClaimError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch("/api/orders/claim-verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        credentials: "include",
+        body: JSON.stringify({ orderNumber, trackingToken, qrData }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || "Claim verification failed.");
+      }
+      showToast(`✅ ${data.message}`);
+      setClaimModal(null);
+      setClaimInput("");
+      await fetchData(true);
+    } catch (err) {
+      setClaimError(err.message || "Claim verification failed.");
+      showToast(err.message || "Claim verification failed.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleUpdateOrderStatus = async (id, newStatus, currentOrder) => {
     try {
       const res = await fetch(`/api/orders/${id}/status`, {
         method: "PATCH",
@@ -162,7 +219,12 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
       if (!res.ok) {
         throw new Error(data.message || "Failed to update order status.");
       }
-      showToast(`Order status updated to ${newStatus}`);
+      if (newStatus === "Ready for Pickup") {
+        const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        showToast(`🔔 ${currentOrder?.queue_number || 'Order'} marked Ready! Notified at ${timeStr}`);
+      } else {
+        showToast(`Order status updated to ${newStatus}`);
+      }
       await fetchData(true);
     } catch (err) {
       showToast(err.message || "Failed to update order status.");
@@ -329,6 +391,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
 
   const TABS = [
     { id:"overview",  icon:"📊", label:"Overview" },
+    { id:"unclaimed", icon:"🔔", label:"Ready / Claim", badge: unclaimedOrders.length>0 ? `${unclaimedOrders.length} ready` : null, bc:"#dcfce7", btc:"#166534" },
     { id:"payments",  icon:"💳", label:"Payments",  badge: pendingCount>0 ? pendingCount : null, bc:"#fef3c7", btc:"#92400e" },
     { id:"orders",    icon:"📦", label:"Orders",    badge: orders.length>0 ? orders.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
     { id:"products",  icon:"🍩", label:"Products",  badge: products.length>0 ? products.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
@@ -395,22 +458,37 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
       </div>
 
       <div className="admin-main" style={{ flex:1, padding:"32px", overflowY:"auto", minWidth:0 }}>
-        {/* Live DB Header Bar with Refresh Button and Timestamp */}
+        {/* Live DB Header Bar with Refresh Button, Claim QR Scan, and Timestamp */}
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px", flexWrap:"wrap", gap:"12px", background:"#fff", border:"1px solid #f0c8bf", borderRadius:"10px", padding:"10px 16px" }}>
           <div style={{ fontSize:"13px", color:"#7a5246", display:"flex", alignItems:"center", gap:"8px" }}>
             <span style={{ width:"8px", height:"8px", borderRadius:"50%", background: isRefreshing ? "#f59e0b" : "#10b981", display:"inline-block" }}></span>
             <span>{isRefreshing ? "Syncing with live database..." : lastRefreshed ? `Live DB synced at ${lastRefreshed.toLocaleTimeString()}` : "Live Database Connected"}</span>
+            {unclaimedOrders.length > 0 && (
+              <span style={{ marginLeft: "8px", background: "#fef3c7", color: "#92400e", padding: "2px 8px", borderRadius: "12px", fontSize: "11px", fontWeight: 700 }}>
+                🔔 {unclaimedOrders.length} Ready & Unclaimed
+              </span>
+            )}
           </div>
-          <button
-            id="admin-refresh-btn"
-            onClick={() => fetchData(true)}
-            disabled={isRefreshing}
-            className="abtn"
-            style={{ background:"#fffaf6", border:"1.5px solid #d96c4a", color:"#d96c4a", padding:"6px 14px", display:"flex", alignItems:"center", gap:"6px", fontSize:"13px" }}
-          >
-            <span>🔄</span>
-            <span>{isRefreshing ? "Refreshing..." : "Refresh Data"}</span>
-          </button>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              onClick={() => { setClaimModal(true); setClaimInput(""); setClaimError(""); }}
+              className="abtn"
+              style={{ background:"#166534", color:"#fff", padding:"6px 14px", display:"flex", alignItems:"center", gap:"6px", fontSize:"13px" }}
+            >
+              <span>📷</span>
+              <span>Verify Claim / Scan QR</span>
+            </button>
+            <button
+              id="admin-refresh-btn"
+              onClick={() => fetchData(true)}
+              disabled={isRefreshing}
+              className="abtn"
+              style={{ background:"#fffaf6", border:"1.5px solid #d96c4a", color:"#d96c4a", padding:"6px 14px", display:"flex", alignItems:"center", gap:"6px", fontSize:"13px" }}
+            >
+              <span>🔄</span>
+              <span>{isRefreshing ? "Refreshing..." : "Refresh Data"}</span>
+            </button>
+          </div>
         </div>
 
         {activeTab === "overview" && (
@@ -458,6 +536,145 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "unclaimed" && (
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"18px", flexWrap:"wrap", gap:"12px" }}>
+              <div>
+                <h1 style={{ color:"#5b2d1c", margin:0 }}>🔔 Ready & Unclaimed Orders</h1>
+                <p style={{ color:"#7a5246", margin:"4px 0 0", fontSize:"13px" }}>
+                  Orders ready at the pickup counter. Live timers show how long each customer has waited since being notified.
+                </p>
+              </div>
+              <button
+                onClick={() => { setClaimModal(true); setClaimInput(""); setClaimError(""); }}
+                className="abtn"
+                style={{ background: "#166534", color: "#fff", padding: "10px 18px", fontSize: "14px" }}
+              >
+                📷 Scan / Verify Claim QR
+              </button>
+            </div>
+
+            {/* Unclaimed Summary Cards */}
+            <div className="admin-stats-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:"14px", marginBottom:"24px" }}>
+              <div className="admin-stat-card" style={{ background:"#fff", borderRadius:"12px", padding:"16px", border:"1px solid #f0c8bf" }}>
+                <p style={{ margin:0, color:"#7a5246", fontSize:"11px", fontWeight:600 }}>Total Waiting at Counter</p>
+                <h3 style={{ margin:"8px 0 0", color:"#5b2d1c", fontSize:"26px", fontWeight:800 }}>{unclaimedOrders.length}</h3>
+              </div>
+              <div className="admin-stat-card" style={{ background:"#fff", borderRadius:"12px", padding:"16px", border:"1px solid #f0c8bf" }}>
+                <p style={{ margin:0, color:"#92400e", fontSize:"11px", fontWeight:600 }}>Escalated (&gt;10 mins)</p>
+                <h3 style={{ margin:"8px 0 0", color:"#d97706", fontSize:"26px", fontWeight:800 }}>
+                  {unclaimedOrders.filter(o => {
+                    const elapsed = o.ready_notified_at ? (nowTime - new Date(o.ready_notified_at).getTime()) / 60000 : 0;
+                    return elapsed >= 10 && elapsed < 20;
+                  }).length}
+                </h3>
+              </div>
+              <div className="admin-stat-card" style={{ background:"#fff", borderRadius:"12px", padding:"16px", border:"1px solid #f0c8bf" }}>
+                <p style={{ margin:0, color:"#dc2626", fontSize:"11px", fontWeight:600 }}>Critical (&gt;20 mins)</p>
+                <h3 style={{ margin:"8px 0 0", color:"#dc2626", fontSize:"26px", fontWeight:800 }}>
+                  {unclaimedOrders.filter(o => {
+                    const elapsed = o.ready_notified_at ? (nowTime - new Date(o.ready_notified_at).getTime()) / 60000 : 0;
+                    return elapsed >= 20;
+                  }).length}
+                </h3>
+              </div>
+            </div>
+
+            {/* Unclaimed Orders Table */}
+            <div style={{ background:"#fff", borderRadius:"12px", border:"1.5px solid #f0c8bf", overflow:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", minWidth:"860px" }}>
+                <thead>
+                  <tr style={{ background:"#fff7f2", textAlign:"left" }}>
+                    {["Queue #","Order #","Customer","Total","Notified At","Elapsed Wait Time","Calls","Actions"].map(h => (
+                      <th key={h} style={{ padding:"12px 14px", fontSize:"13px" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {unclaimedOrders.length === 0 && (
+                    <tr>
+                      <td colSpan="8" style={{ padding:"36px", textAlign:"center", color:"#bbb" }}>
+                        ✨ No unclaimed orders! All ready orders have been claimed by customers.
+                      </td>
+                    </tr>
+                  )}
+                  {unclaimedOrders.map((o) => {
+                    const startTime = o.ready_notified_at ? new Date(o.ready_notified_at).getTime() : nowTime;
+                    const elapsedSec = Math.max(0, Math.floor((nowTime - startTime) / 1000));
+                    const elapsedMin = Math.floor(elapsedSec / 60);
+                    const remSec = elapsedSec % 60;
+
+                    let badgeBg = "#dcfce7";
+                    let badgeColor = "#166534";
+                    let label = `${elapsedMin}m ${remSec}s`;
+
+                    if (elapsedMin >= 20) {
+                      badgeBg = "#fee2e2";
+                      badgeColor = "#dc2626";
+                      label = `⚠ ${elapsedMin}m ${remSec}s (Critical)`;
+                    } else if (elapsedMin >= 10) {
+                      badgeBg = "#fef3c7";
+                      badgeColor = "#92400e";
+                      label = `⏳ ${elapsedMin}m ${remSec}s (Escalated)`;
+                    }
+
+                    return (
+                      <tr key={o.id} style={{ borderTop:"1px solid #f6e3de" }}>
+                        <td style={{ padding:"12px 14px" }}>
+                          <span style={{ fontSize:"18px", fontWeight:900, color:"#d96c4a", background:"#fff5f0", padding:"4px 10px", borderRadius:"8px", border:"1px solid #f8d9d1" }}>
+                            {o.queue_number || "—"}
+                          </span>
+                        </td>
+                        <td style={{ padding:"12px 14px", fontWeight:700, color:"#5b2d1c" }}>
+                          {o.order_number}
+                        </td>
+                        <td style={{ padding:"12px 14px" }}>
+                          <div style={{ fontWeight:600, fontSize:"13px" }}>{o.customer_name}</div>
+                          <div style={{ fontSize:"11px", color:"#888" }}>{o.customer_contact}</div>
+                        </td>
+                        <td style={{ padding:"12px 14px", fontWeight:700 }}>
+                          ₱{Number(o.total_amount).toFixed(2)}
+                        </td>
+                        <td style={{ padding:"12px 14px", fontSize:"12px", color:"#7a5246" }}>
+                          {o.ready_notified_at ? new Date(o.ready_notified_at).toLocaleTimeString() : "Just now"}
+                        </td>
+                        <td style={{ padding:"12px 14px" }}>
+                          <span style={{ background:badgeBg, color:badgeColor, padding:"4px 10px", borderRadius:"12px", fontWeight:700, fontSize:"12px", whiteSpace:"nowrap" }}>
+                            {label}
+                          </span>
+                        </td>
+                        <td style={{ padding:"12px 14px", fontSize:"12px", textAlign:"center", fontWeight:600 }}>
+                          {o.reminder_count || 0}
+                        </td>
+                        <td style={{ padding:"12px 14px" }}>
+                          <div style={{ display:"flex", gap:"6px", flexWrap:"wrap" }}>
+                            <button
+                              onClick={() => handleCallNumber(o.id, o.queue_number)}
+                              className="abtn"
+                              style={{ background:"#f0c8bf", color:"#5b2d1c" }}
+                              title="Re-announce number on store board"
+                            >
+                              📢 Call Number
+                            </button>
+                            <button
+                              onClick={() => handleVerifyClaim({ orderNumber: o.order_number, trackingToken: o.tracking_token })}
+                              className="abtn"
+                              style={{ background:"#166534", color:"#fff" }}
+                              title="Confirm customer picked up order"
+                            >
+                              ✅ Mark Claimed
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
@@ -528,16 +745,21 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
               ))}
             </div>
             <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #f0c8bf", overflow:"auto" }}>
-              <table style={{ width:"100%", borderCollapse:"collapse", minWidth:"820px" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", minWidth:"880px" }}>
                 <thead><tr style={{ background:"#fff7f2", textAlign:"left" }}>
-                  {["Order #","Customer","Total","Payment","Order Status","Pickup","Actions"].map(h => <th key={h} style={{ padding:"12px 14px", fontSize:"13px" }}>{h}</th>)}
+                  {["Queue #","Order #","Customer","Total","Payment","Order Status","Pickup","Actions"].map(h => <th key={h} style={{ padding:"12px 14px", fontSize:"13px" }}>{h}</th>)}
                 </tr></thead>
                 <tbody>
-                  {filteredOrders.length === 0 && <tr><td colSpan="7" style={{ padding:"32px", textAlign:"center", color:"#bbb" }}>No orders found.</td></tr>}
+                  {filteredOrders.length === 0 && <tr><td colSpan="8" style={{ padding:"32px", textAlign:"center", color:"#bbb" }}>No orders found.</td></tr>}
                   {filteredOrders.map(o => (
                     <React.Fragment key={o.id}>
                       <tr style={{ borderTop:"1px solid #f6e3de", cursor:"pointer" }} onClick={() => setExpandedOrder(expandedOrder===o.id?null:o.id)}>
-                        <td style={{ padding:"12px 14px", fontWeight:700, color:"#d96c4a" }}>
+                        <td style={{ padding:"12px 14px" }}>
+                          <span style={{ fontSize:"15px", fontWeight:800, color:"#d96c4a", background:"#fff5f0", padding:"3px 8px", borderRadius:"6px", border:"1px solid #f8d9d1" }}>
+                            {o.queue_number || "—"}
+                          </span>
+                        </td>
+                        <td style={{ padding:"12px 14px", fontWeight:700, color:"#5b2d1c" }}>
                           <span style={{ marginRight:"4px", fontSize:"10px", color:"#aaa" }}>{expandedOrder===o.id?"v":">"}</span>
                           {o.order_number}
                         </td>
@@ -549,13 +771,17 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
                         <td style={{ padding:"12px 14px", fontWeight:700 }}>\u20B1{Number(o.total_amount).toFixed(2)}</td>
                         <td style={{ padding:"12px 14px" }}>{paymentBadge(o.payment_status)}</td>
                         <td style={{ padding:"12px 14px" }} onClick={e => e.stopPropagation()}>
-                          <select value={o.order_status||"Pending Payment"} onChange={e => handleUpdateOrderStatus(o.id,e.target.value)} style={{ padding:"6px 10px", borderRadius:"6px", border:"1px solid #f0c8bf", fontSize:"13px", cursor:"pointer", background:"#fff" }}>
+                          <select value={o.order_status||"Pending Payment"} onChange={e => handleUpdateOrderStatus(o.id,e.target.value,o)} style={{ padding:"6px 10px", borderRadius:"6px", border:"1px solid #f0c8bf", fontSize:"13px", cursor:"pointer", background:"#fff" }}>
                             {["Pending Payment","Awaiting Payment Verification","Confirmed","Processing","Preparing","Ready for Pickup","Completed","Cancelled"].map(s => <option key={s} value={s}>{s}</option>)}
                           </select>
                         </td>
                         <td style={{ padding:"12px 14px", fontSize:"12px", color:"#5b2d1c" }}>{o.pickup_date||"N/A"}<br /><span style={{ color:"#888" }}>{o.pickup_time||""}</span></td>
                         <td style={{ padding:"12px 14px" }} onClick={e => e.stopPropagation()}>
-                          <Link to={`/receipt/${o.order_number}`} target="_blank" style={{ color:"#d96c4a", textDecoration:"none", fontWeight:700, fontSize:"12px" }}>Receipt</Link>
+                          <div style={{ display:"flex", gap:"8px", alignItems:"center" }}>
+                            <Link to={`/track/${o.order_number}`} target="_blank" style={{ color:"#166534", textDecoration:"none", fontWeight:700, fontSize:"12px" }}>Track</Link>
+                            <span style={{ color:"#ccc" }}>|</span>
+                            <Link to={`/receipt/${o.order_number}`} target="_blank" style={{ color:"#d96c4a", textDecoration:"none", fontWeight:700, fontSize:"12px" }}>Receipt</Link>
+                          </div>
                         </td>
                       </tr>
                       {expandedOrder === o.id && (
@@ -818,6 +1044,63 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
                 <button type="button" onClick={() => setShowPasswordModal(false)} style={{ padding:"10px 18px", background:"#eee", border:"none", borderRadius:"8px", cursor:"pointer", fontWeight:600 }}>Cancel</button>
                 <button type="submit" disabled={passwordLoading} style={{ padding:"10px 18px", background:"#d96c4a", color:"#fff", border:"none", borderRadius:"8px", cursor:"pointer", fontWeight:700 }}>
                   {passwordLoading ? "Saving..." : "Update Password"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {claimModal && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:"16px" }}>
+          <div style={{ background:"#fff", padding:"28px 24px", borderRadius:"18px", width:"100%", maxWidth:"460px", boxSizing:"border-box", boxShadow: "0 20px 40px rgba(0,0,0,.2)" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px" }}>
+              <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"20px" }}>📷 Verify & Complete Claim</h2>
+              <button onClick={() => setClaimModal(null)} style={{ background:"transparent", border:"none", fontSize:"20px", cursor:"pointer", color:"#888" }}>&times;</button>
+            </div>
+            <p style={{ color:"#7a5246", fontSize:"13px", margin:"0 0 16px" }}>
+              Scan the customer's Claim Card QR code with your barcode/camera scanner, or enter their <strong>Order Number</strong> / <strong>Tracking Token</strong>.
+            </p>
+
+            {claimError && (
+              <div style={{ background:"#fee2e2", border:"1px solid #f87171", color:"#991b1b", padding:"10px 14px", borderRadius:"8px", marginBottom:"16px", fontSize:"13px" }}>
+                ⚠ {claimError}
+              </div>
+            )}
+
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              if (!claimInput.trim()) return;
+              handleVerifyClaim({ qrData: claimInput.trim(), orderNumber: claimInput.trim() });
+            }}>
+              <div style={{ marginBottom:"18px" }}>
+                <label style={{ display:"block", marginBottom:"6px", fontWeight:700, color:"#5b2d1c", fontSize:"13px" }}>
+                  QR Payload or Order Number
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="e.g. GLAZY_CLAIM:ORD-100246:... or ORD-100246"
+                  value={claimInput}
+                  onChange={(e) => setClaimInput(e.target.value)}
+                  style={{ width:"100%", padding:"11px 14px", borderRadius:"10px", border:"1.5px solid #f0c8bf", boxSizing:"border-box", fontSize:"14px", outline:"none" }}
+                />
+              </div>
+
+              <div style={{ display:"flex", justifyContent:"flex-end", gap:"10px" }}>
+                <button
+                  type="button"
+                  onClick={() => setClaimModal(null)}
+                  style={{ padding:"10px 18px", background:"#eee", border:"none", borderRadius:"8px", cursor:"pointer", fontWeight:600 }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading || !claimInput.trim()}
+                  style={{ padding:"10px 22px", background:"#166534", color:"#fff", border:"none", borderRadius:"8px", cursor:"pointer", fontWeight:700, fontSize:"14px" }}
+                >
+                  {actionLoading ? "Verifying..." : "Confirm Claim & Complete"}
                 </button>
               </div>
             </form>

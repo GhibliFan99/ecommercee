@@ -156,19 +156,28 @@ export function seedSampleData() {
         orderItems.push({ prod, unitPrice, qty: item.qty, subtotal });
       }
 
-      // Next order number
+      // Next order number and queue number
       const nextNum = db.prepare('SELECT COUNT(*) as count FROM orders').get().count + 1;
       const orderNumber = `ORD-${String(nextNum).padStart(6, '0')}`;
+      const letterIndex = Math.floor((nextNum - 1) / 999) % 26;
+      const prefix = String.fromCharCode(65 + letterIndex);
+      const numInBatch = ((nextNum - 1) % 999) + 1;
+      const queueNumber = `${prefix}-${String(numInBatch).padStart(3, '0')}`;
+      const trackingToken = `track_${nextNum}_${Math.random().toString(36).substring(2, 10)}`;
       const custId = custMap[data.customer.email] || null;
+
+      const readyNotifiedAt = data.orderStatus === 'Ready for Pickup' ? (data.readyNotifiedAt || data.createdAt) : null;
 
       const orderResult = db.prepare(`
         INSERT INTO orders (
-          order_number, customer_name, customer_contact, customer_email,
+          order_number, queue_number, tracking_token, customer_name, customer_contact, customer_email,
           customer_address, customer_id, total_amount, payment_status,
-          order_status, pickup_date, pickup_time, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          order_status, pickup_date, pickup_time, ready_notified_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         orderNumber,
+        queueNumber,
+        trackingToken,
         data.customer.name,
         data.customer.phone,
         data.customer.email,
@@ -179,6 +188,7 @@ export function seedSampleData() {
         data.orderStatus,
         data.pickupDate,
         data.pickupTime,
+        readyNotifiedAt,
         data.createdAt,
         data.createdAt
       );
@@ -212,6 +222,16 @@ export function seedSampleData() {
         INSERT INTO order_status_history (order_id, previous_status, new_status, note, created_at)
         VALUES (?, ?, ?, ?, ?)
       `).run(orderId, null, data.orderStatus, `Initial state: ${data.orderStatus}`, data.createdAt);
+
+      // Notifications record for ready orders
+      if (data.orderStatus === 'Ready for Pickup') {
+        try {
+          db.prepare(`
+            INSERT OR IGNORE INTO notifications (order_id, type, channel, status, sent_at, created_at)
+            VALUES (?, 'ready', 'in_app', 'sent', ?, ?)
+          `).run(orderId, readyNotifiedAt, readyNotifiedAt);
+        } catch (_ignore) {}
+      }
     }
   });
 

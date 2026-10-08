@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
+import { z } from 'zod';
 import { checkRateLimit, recordFailedAttempt, resetRateLimit } from './middleware/rateLimiter.js';
 
 dotenv.config();
@@ -228,6 +229,79 @@ function initializeDatabase() {
     db.exec("UPDATE orders SET payment_status = 'Pending Verification' WHERE payment_status = 'Pending'");
   } catch (_e) { /* ignore */ }
 
+  // Ready to Claim notification tables & columns (Migration 002)
+  try { db.exec('ALTER TABLE orders ADD COLUMN queue_number TEXT'); } catch (_e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN tracking_token TEXT'); } catch (_e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN ready_notified_at TEXT'); } catch (_e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN claimed_at TEXT'); } catch (_e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN claimed_by TEXT'); } catch (_e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN reminder_count INTEGER NOT NULL DEFAULT 0'); } catch (_e) {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN last_called_at TEXT'); } catch (_e) {}
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'sent',
+      sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (order_id) REFERENCES orders(id),
+      UNIQUE (order_id, type, channel)
+    );
+
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER,
+      endpoint TEXT NOT NULL UNIQUE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (order_id) REFERENCES orders(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS notification_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // Backfill queue numbers and tracking tokens for any orders missing them
+  try {
+    const unassigned = db.prepare('SELECT id FROM orders WHERE queue_number IS NULL OR tracking_token IS NULL').all();
+    for (const o of unassigned) {
+      const letterIndex = Math.floor((o.id - 1) / 999) % 26;
+      const prefix = String.fromCharCode(65 + letterIndex);
+      const num = ((o.id - 1) % 999) + 1;
+      const qNum = `${prefix}-${String(num).padStart(3, '0')}`;
+      const token = uuidv4().replace(/-/g, '');
+      db.prepare('UPDATE orders SET queue_number = COALESCE(queue_number, ?), tracking_token = COALESCE(tracking_token, ?) WHERE id = ?')
+        .run(qNum, token, o.id);
+    }
+  } catch (_e) {}
+
+  // Backfill ready_notified_at for existing orders that are already Ready for Pickup
+  try {
+    db.prepare(`
+      UPDATE orders 
+      SET ready_notified_at = updated_at 
+      WHERE order_status = 'Ready for Pickup' AND ready_notified_at IS NULL
+    `).run();
+  } catch (_e) {}
+
+  // Initialize default notification settings if empty
+  try {
+    const existingRules = db.prepare('SELECT key FROM notification_settings WHERE key = ?').get('unclaimed_rules');
+    if (!existingRules) {
+      db.prepare('INSERT INTO notification_settings (key, value) VALUES (?, ?)').run(
+        'unclaimed_rules',
+        JSON.stringify({ orangeThresholdMinutes: 10, redThresholdMinutes: 20, autoRemindMinutes: 15, noShowHours: 24 })
+      );
+    }
+  } catch (_e) {}
 
   const seededProducts = [
     { name: 'Choco Star Delight', description: 'Rich chocolate glaze with golden sprinkles.', price: 49, stock_quantity: 15, image: '/assets/donuts/donut-1.png' },
@@ -272,6 +346,56 @@ initializeDatabase();
 
 function formatOrderNumber(value) {
   return `ORD-${String(value).padStart(6, '0')}`;
+}
+
+function generateQueueNumber(orderId) {
+  const numId = Number(orderId) || 1;
+  const letterIndex = Math.floor((numId - 1) / 999) % 26;
+  const prefix = String.fromCharCode(65 + letterIndex);
+  const numInBatch = ((numId - 1) % 999) + 1;
+  return `${prefix}-${String(numInBatch).padStart(3, '0')}`;
+}
+
+function getNotificationSettings() {
+  try {
+    const row = db.prepare('SELECT value FROM notification_settings WHERE key = ?').get('unclaimed_rules');
+    if (row && row.value) {
+      return JSON.parse(row.value);
+    }
+  } catch (_e) {}
+  return { orangeThresholdMinutes: 10, redThresholdMinutes: 20, autoRemindMinutes: 15, noShowHours: 24 };
+}
+
+function evaluateUnclaimedRulesLazily() {
+  try {
+    const settings = getNotificationSettings();
+    const autoRemindMinutes = Number(settings.autoRemindMinutes || 15);
+    const readyOrders = db.prepare(`
+      SELECT id, order_number, queue_number, ready_notified_at, reminder_count 
+      FROM orders 
+      WHERE order_status = 'Ready for Pickup'
+    `).all();
+
+    const now = Date.now();
+    for (const o of readyOrders) {
+      if (!o.ready_notified_at) continue;
+      const notifiedTime = new Date(o.ready_notified_at).getTime();
+      const diffMinutes = (now - notifiedTime) / 60000;
+
+      // Lazy auto-remind rule: remind once after configured minutes
+      if (diffMinutes >= autoRemindMinutes && Number(o.reminder_count || 0) === 0) {
+        db.prepare('UPDATE orders SET reminder_count = 1 WHERE id = ?').run(o.id);
+        try {
+          db.prepare(`
+            INSERT OR IGNORE INTO notifications (order_id, type, channel, status, sent_at)
+            VALUES (?, 'reminder', 'in_app', 'sent', CURRENT_TIMESTAMP)
+          `).run(o.id);
+        } catch (_ignore) {}
+      }
+    }
+  } catch (err) {
+    console.warn('Error during evaluateUnclaimedRulesLazily:', err.message);
+  }
 }
 
 function logAudit({ adminId = null, action, entityType = null, entityId = null, details = null, ipAddress = null }) {
@@ -768,8 +892,31 @@ app.put('/api/inventory/:id', requireAuth, (req, res) => {
 
 app.get('/api/orders', requireAuth, (_req, res) => {
   cancelExpiredOrders();
+  evaluateUnclaimedRulesLazily();
   const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
-  return res.json(orders);
+
+  const itemsStmt = db.prepare('SELECT product_id, product_name as name, quantity, unit_price as unitPrice, subtotal FROM order_items WHERE order_id = ?');
+  const paymentStmt = db.prepare('SELECT payment_method, payment_reference, status as payment_status, amount, verified_at, admin_notes FROM payments WHERE order_id = ? ORDER BY id DESC LIMIT 1');
+
+  const now = Date.now();
+  const enriched = orders.map((o) => {
+    const items = itemsStmt.all(o.id);
+    const p = paymentStmt.get(o.id);
+    let waitSeconds = null;
+    if (o.order_status === 'Ready for Pickup' && o.ready_notified_at) {
+      const start = new Date(o.ready_notified_at).getTime();
+      waitSeconds = Math.max(0, Math.floor((now - start) / 1000));
+    }
+    return {
+      ...o,
+      payment_method: p?.payment_method || 'GCash',
+      payment_reference: p?.payment_reference || null,
+      items,
+      waitSeconds,
+    };
+  });
+
+  return res.json(enriched);
 });
 
 app.get('/api/orders/:id', requireAuth, (req, res) => {
@@ -852,7 +999,40 @@ app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
       }
     }
 
-    db.prepare('UPDATE orders SET order_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(order_status, order.id);
+    // Status update & timestamp records
+    const nowIso = new Date().toISOString();
+    let readyNotifiedAt = order.ready_notified_at;
+    let claimedAt = order.claimed_at;
+    let claimedBy = order.claimed_by;
+
+    if (order_status === 'Ready for Pickup') {
+      if (!readyNotifiedAt) {
+        readyNotifiedAt = nowIso;
+      }
+      try {
+        db.prepare(`
+          INSERT OR IGNORE INTO notifications (order_id, type, channel, status, sent_at)
+          VALUES (?, 'ready', 'in_app', 'sent', CURRENT_TIMESTAMP)
+        `).run(order.id);
+      } catch (_e) {}
+    } else if (order_status === 'Completed') {
+      if (!claimedAt) {
+        claimedAt = nowIso;
+      }
+      claimedBy = claimedBy || req.admin?.username || 'staff';
+      try {
+        db.prepare(`
+          INSERT OR IGNORE INTO notifications (order_id, type, channel, status, sent_at)
+          VALUES (?, 'claimed', 'in_app', 'sent', CURRENT_TIMESTAMP)
+        `).run(order.id);
+      } catch (_e) {}
+    }
+
+    db.prepare(`
+      UPDATE orders 
+      SET order_status = ?, ready_notified_at = ?, claimed_at = ?, claimed_by = ?, updated_at = CURRENT_TIMESTAMP 
+      WHERE id = ?
+    `).run(order_status, readyNotifiedAt, claimedAt, claimedBy, order.id);
 
     db.prepare(
       'INSERT INTO order_status_history (order_id, previous_status, new_status, changed_by_admin_id, note, stock_restored) VALUES (?, ?, ?, ?, ?, ?)'
@@ -882,6 +1062,334 @@ app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
     return res.json(updated);
   } catch (err) {
     return res.status(500).json({ message: err.message || 'Failed to update order status.' });
+  }
+});
+
+// ── Call Queue Number (Admin, Rate-limited to once per 30s) ──────────────────
+app.post('/api/orders/:id/call', requireAuth, (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id));
+  if (!order) {
+    return res.status(404).json({ message: 'Order not found.' });
+  }
+
+  if (order.order_status !== 'Ready for Pickup') {
+    return res.status(400).json({ message: 'Only orders that are Ready for Pickup can be called.' });
+  }
+
+  const now = Date.now();
+  if (order.last_called_at) {
+    const lastCalled = new Date(order.last_called_at).getTime();
+    const elapsedSeconds = Math.floor((now - lastCalled) / 1000);
+    const cooldown = 30;
+    if (elapsedSeconds < cooldown) {
+      const wait = cooldown - elapsedSeconds;
+      return res.status(429).json({
+        message: `Rate limit: Please wait ${wait}s before calling this number again.`,
+        retryAfterSeconds: wait,
+      });
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  db.prepare(`
+    UPDATE orders 
+    SET last_called_at = ?, reminder_count = reminder_count + 1, updated_at = CURRENT_TIMESTAMP 
+    WHERE id = ?
+  `).run(nowIso, order.id);
+
+  try {
+    db.prepare(`
+      INSERT INTO notifications (order_id, type, channel, status, sent_at)
+      VALUES (?, 'reminder', 'in_app', 'sent', CURRENT_TIMESTAMP)
+    `).run(order.id);
+  } catch (_e) {}
+
+  logAudit({
+    adminId: req.admin?.id,
+    action: 'QUEUE_NUMBER_CALLED',
+    entityType: 'order',
+    entityId: order.id,
+    details: { orderNumber: order.order_number, queueNumber: order.queue_number },
+    ipAddress: req.ip,
+  });
+
+  return res.json({
+    ok: true,
+    message: `Queue number ${order.queue_number} called!`,
+    queue_number: order.queue_number,
+    last_called_at: nowIso,
+  });
+});
+
+// ── Claim Verification & QR Scanning (Admin) ─────────────────────────────────
+const claimSchema = z.object({
+  orderNumber: z.string().optional(),
+  trackingToken: z.string().optional(),
+  qrData: z.string().optional(),
+});
+
+app.post('/api/orders/claim-verify', requireAuth, (req, res) => {
+  const parseResult = claimSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({ message: 'Invalid claim request format.' });
+  }
+
+  let { orderNumber, trackingToken, qrData } = parseResult.data;
+
+  // Support parsing scanned QR code payload: either JSON or "GLAZY_CLAIM:<ord>:<token>" or direct string
+  if (qrData) {
+    try {
+      const parsed = JSON.parse(qrData);
+      if (parsed.orderNumber) orderNumber = parsed.orderNumber;
+      if (parsed.token || parsed.trackingToken) trackingToken = parsed.token || parsed.trackingToken;
+    } catch (_e) {
+      if (qrData.startsWith('GLAZY_CLAIM:')) {
+        const parts = qrData.split(':');
+        orderNumber = parts[1];
+        trackingToken = parts[2];
+      } else {
+        // Assume raw format "orderNumber:token"
+        const parts = qrData.split(':');
+        if (parts.length === 2) {
+          orderNumber = parts[0];
+          trackingToken = parts[1];
+        }
+      }
+    }
+  }
+
+  if (!orderNumber) {
+    return res.status(400).json({ message: 'Order number is required to verify claim.' });
+  }
+
+  const order = db.prepare('SELECT * FROM orders WHERE order_number = ?').get(orderNumber.trim());
+  if (!order) {
+    return res.status(404).json({ message: `Order ${orderNumber} not found.` });
+  }
+
+  if (order.order_status === 'Completed') {
+    return res.status(400).json({
+      message: `Order ${order.order_number} (Queue ${order.queue_number}) was already claimed on ${order.claimed_at ? new Date(order.claimed_at).toLocaleString() : 'an earlier session'}.`,
+      alreadyClaimed: true,
+    });
+  }
+
+  if (trackingToken && order.tracking_token && order.tracking_token !== trackingToken.trim()) {
+    return res.status(400).json({ message: 'Invalid claim token. QR code verification failed.' });
+  }
+
+  const nowIso = new Date().toISOString();
+  const staffName = req.admin?.username || 'staff';
+
+  db.prepare(`
+    UPDATE orders 
+    SET order_status = 'Completed', claimed_at = ?, claimed_by = ?, updated_at = CURRENT_TIMESTAMP 
+    WHERE id = ?
+  `).run(nowIso, staffName, order.id);
+
+  db.prepare(
+    'INSERT INTO order_status_history (order_id, previous_status, new_status, changed_by_admin_id, note) VALUES (?, ?, ?, ?, ?)'
+  ).run(order.id, order.order_status, 'Completed', req.admin?.id || null, `Claim confirmed and verified by ${staffName}`);
+
+  try {
+    db.prepare(`
+      INSERT OR IGNORE INTO notifications (order_id, type, channel, status, sent_at)
+      VALUES (?, 'claimed', 'in_app', 'sent', CURRENT_TIMESTAMP)
+    `).run(order.id);
+  } catch (_e) {}
+
+  logAudit({
+    adminId: req.admin?.id,
+    action: 'ORDER_CLAIM_VERIFIED',
+    entityType: 'order',
+    entityId: order.id,
+    details: { orderNumber: order.order_number, queueNumber: order.queue_number, claimedBy: staffName },
+    ipAddress: req.ip,
+  });
+
+  return res.json({
+    ok: true,
+    message: `Order ${order.order_number} (Queue ${order.queue_number}) successfully verified and claimed!`,
+    order: {
+      ...order,
+      order_status: 'Completed',
+      claimed_at: nowIso,
+      claimed_by: staffName,
+    },
+  });
+});
+
+// ── Unclaimed Orders Summary (Admin) ─────────────────────────────────────────
+app.get('/api/admin/unclaimed-summary', requireAuth, (_req, res) => {
+  evaluateUnclaimedRulesLazily();
+  const settings = getNotificationSettings();
+  const orangeMin = Number(settings.orangeThresholdMinutes || 10);
+  const redMin = Number(settings.redThresholdMinutes || 20);
+
+  const readyOrders = db.prepare(`
+    SELECT id, order_number, queue_number, customer_name, total_amount, 
+           ready_notified_at, last_called_at, reminder_count, pickup_time
+    FROM orders 
+    WHERE order_status = 'Ready for Pickup'
+    ORDER BY ready_notified_at ASC
+  `).all();
+
+  const now = Date.now();
+  const processed = readyOrders.map((o) => {
+    let elapsedSeconds = 0;
+    if (o.ready_notified_at) {
+      elapsedSeconds = Math.max(0, Math.floor((now - new Date(o.ready_notified_at).getTime()) / 1000));
+    }
+    const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+    let severity = 'normal';
+    if (elapsedMinutes >= redMin) severity = 'red';
+    else if (elapsedMinutes >= orangeMin) severity = 'orange';
+
+    return {
+      ...o,
+      elapsedSeconds,
+      elapsedMinutes,
+      severity,
+    };
+  });
+
+  return res.json({
+    count: processed.length,
+    orangeThresholdMinutes: orangeMin,
+    redThresholdMinutes: redMin,
+    orders: processed,
+  });
+});
+
+// ── Notification Settings (Admin / Owner Only) ───────────────────────────────
+app.get('/api/admin/notification-settings', requireAuth, (_req, res) => {
+  const settings = getNotificationSettings();
+  return res.json(settings);
+});
+
+const settingsSchema = z.object({
+  orangeThresholdMinutes: z.number().int().min(1).max(180),
+  redThresholdMinutes: z.number().int().min(2).max(360),
+  autoRemindMinutes: z.number().int().min(1).max(180),
+  noShowHours: z.number().int().min(1).max(72),
+});
+
+app.put('/api/admin/notification-settings', requireAuth, requireRole(['owner']), (req, res) => {
+  const parsed = settingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ message: 'Invalid notification settings parameters.' });
+  }
+
+  db.prepare(`
+    INSERT INTO notification_settings (key, value, updated_at) 
+    VALUES ('unclaimed_rules', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+  `).run(JSON.stringify(parsed.data));
+
+  logAudit({
+    adminId: req.admin?.id,
+    action: 'NOTIFICATION_SETTINGS_UPDATED',
+    details: parsed.data,
+    ipAddress: req.ip,
+  });
+
+  return res.json({ ok: true, message: 'Settings saved.', settings: parsed.data });
+});
+
+// ── Public "Now Serving" Board Endpoint (/queue) ─────────────────────────────
+app.get('/api/queue', (_req, res) => {
+  evaluateUnclaimedRulesLazily();
+  // Privacy safe: Strictly return queue numbers, statuses, and timestamps. NO names or phones!
+  const ready = db.prepare(`
+    SELECT id, queue_number, ready_notified_at, last_called_at 
+    FROM orders 
+    WHERE order_status = 'Ready for Pickup'
+    ORDER BY ready_notified_at DESC
+    LIMIT 30
+  `).all();
+
+  const preparing = db.prepare(`
+    SELECT id, queue_number, updated_at 
+    FROM orders 
+    WHERE order_status IN ('Preparing', 'Processing')
+    ORDER BY id ASC
+    LIMIT 30
+  `).all();
+
+  return res.json({
+    ready,
+    preparing,
+    lastUpdated: new Date().toISOString(),
+  });
+});
+
+// ── Public Order Tracking Endpoint (/track) ──────────────────────────────────
+app.get('/api/track/:tokenOrNumber', (req, res) => {
+  evaluateUnclaimedRulesLazily();
+  const param = (req.params.tokenOrNumber || '').trim();
+  if (!param) {
+    return res.status(400).json({ message: 'Tracking reference required.' });
+  }
+
+  // Lookup order by tracking_token OR order_number
+  let order = db.prepare('SELECT * FROM orders WHERE tracking_token = ?').get(param);
+  if (!order) {
+    order = db.prepare('SELECT * FROM orders WHERE order_number = ?').get(param);
+  }
+
+  if (!order) {
+    return res.status(404).json({ message: 'Order not found for the provided reference.' });
+  }
+
+  const items = db.prepare(`
+    SELECT product_name as name, quantity, unit_price, subtotal 
+    FROM order_items 
+    WHERE order_id = ?
+  `).all(order.id);
+
+  const qrData = `GLAZY_CLAIM:${order.order_number}:${order.tracking_token}`;
+
+  // Return non-sensitive, customer-friendly payload
+  return res.json({
+    orderNumber: order.order_number,
+    queueNumber: order.queue_number,
+    trackingToken: order.tracking_token,
+    orderStatus: order.order_status,
+    paymentStatus: order.payment_status,
+    pickupDate: order.pickup_date,
+    pickupTime: order.pickup_time,
+    totalAmount: order.total_amount,
+    readyNotifiedAt: order.ready_notified_at,
+    lastCalledAt: order.last_called_at,
+    claimedAt: order.claimed_at,
+    createdAt: order.created_at,
+    items,
+    qrData,
+  });
+});
+
+// ── Web Push Subscription (Optional free VAPID) ──────────────────────────────
+app.post('/api/push/subscribe', (req, res) => {
+  const { orderNumber, trackingToken, subscription } = req.body || {};
+  if (!subscription || !subscription.endpoint || !subscription.keys) {
+    return res.status(400).json({ message: 'Invalid subscription payload.' });
+  }
+
+  let orderId = null;
+  if (trackingToken || orderNumber) {
+    const o = db.prepare('SELECT id FROM orders WHERE tracking_token = ? OR order_number = ?').get(trackingToken || '', orderNumber || '');
+    if (o) orderId = o.id;
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO push_subscriptions (order_id, endpoint, p256dh, auth)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(endpoint) DO UPDATE SET order_id = excluded.order_id
+    `).run(orderId, subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth);
+    return res.json({ ok: true, message: 'Push subscription stored successfully.' });
+  } catch (err) {
+    return res.status(500).json({ message: 'Could not save push subscription.' });
   }
 });
 
@@ -1153,8 +1661,11 @@ app.post('/api/orders', (req, res) => {
 
     // 3. Safe sequential order number generation
     const maxOrder = db.prepare('SELECT MAX(id) as max_id FROM orders').get();
-    const nextSeq = 100246 + (maxOrder?.max_id ? Number(maxOrder.max_id) : 0);
+    const nextId = (maxOrder?.max_id ? Number(maxOrder.max_id) : 0) + 1;
+    const nextSeq = 100246 + nextId;
     const orderNumber = `ORD-${nextSeq}`;
+    const queueNumber = generateQueueNumber(nextId);
+    const trackingToken = uuidv4().replace(/-/g, '');
 
     const initialOrderStatus = paymentReference && paymentReference.trim()
       ? 'Awaiting Payment Verification'
@@ -1164,12 +1675,14 @@ app.post('/api/orders', (req, res) => {
     // 4. Create Order Record
     const orderResult = db.prepare(`
       INSERT INTO orders (
-        order_number, customer_name, customer_contact, customer_email,
+        order_number, queue_number, tracking_token, customer_name, customer_contact, customer_email,
         customer_address, customer_id, total_amount, payment_status,
         order_status, pickup_date, pickup_time, idempotency_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       orderNumber,
+      queueNumber,
+      trackingToken,
       customer.fullName,
       customer.contactNumber || '',
       customer.email || '',
@@ -1223,6 +1736,8 @@ app.post('/api/orders', (req, res) => {
     return {
       orderId,
       orderNumber,
+      queueNumber,
+      trackingToken,
       totalAmount,
       orderStatus: initialOrderStatus,
       paymentStatus: initialPaymentStatus,
@@ -1236,6 +1751,8 @@ app.post('/api/orders', (req, res) => {
       order: {
         id: result.orderId,
         order_number: result.orderNumber,
+        queue_number: result.queueNumber,
+        tracking_token: result.trackingToken,
         total_amount: result.totalAmount,
         order_status: result.orderStatus,
         payment_status: result.paymentStatus,
@@ -1295,6 +1812,9 @@ app.get('/api/receipts/:orderNumber', (req, res) => {
       subtotal: Number(item.subtotal),
     })),
     totalAmount: Number(order.total_amount),
+    queueNumber: order.queue_number,
+    trackingToken: order.tracking_token,
+    readyNotifiedAt: order.ready_notified_at,
     paymentMethod: payments[0]?.payment_method || 'N/A',
     paymentReference: payments[0]?.payment_reference || null,
     paymentStatus: order.payment_status,

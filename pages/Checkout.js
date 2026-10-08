@@ -58,6 +58,7 @@ function Checkout({ cart, clearCart }) {
   const [pickupTime, setPickupTime] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
   const [orderNumber, setOrderNumber] = useState("");
+  const [queueNumber, setQueueNumber] = useState("");
   const [orderId, setOrderId] = useState(null);
   const [orderPaymentStatus, setOrderPaymentStatus] = useState("");
   const navigate = useNavigate();
@@ -150,9 +151,11 @@ function Checkout({ cart, clearCart }) {
       placedOrderNumber = data.order.order_number;
       placedOrderId = data.order.id;
       placedPaymentStatus = data.order.payment_status;
+      const placedQueueNumber = data.order.queue_number || "";
 
       setIsConfirmed(true);
       setOrderNumber(placedOrderNumber);
+      setQueueNumber(placedQueueNumber);
       setOrderId(placedOrderId);
       setOrderPaymentStatus(placedPaymentStatus);
       clearCart();
@@ -170,6 +173,13 @@ function Checkout({ cart, clearCart }) {
           <div style={{ fontSize: "60px", marginBottom: "16px" }}>📋</div>
           <h2 style={{ color: "#d96c4a" }}>Order Placed!</h2>
           <p>Thank you, <strong>{customer.fullName}</strong>! Your order has been received.</p>
+
+          {queueNumber && (
+            <div style={{ margin: "16px 0", padding: "14px", background: "#fff5f0", borderRadius: "14px", border: "2px solid #f8d9d1", display: "inline-block" }}>
+              <span style={{ fontSize: "12px", color: "#7a5246", fontWeight: "700", textTransform: "uppercase", display: "block" }}>Your Queue Number</span>
+              <span style={{ fontSize: "36px", fontWeight: "900", color: "#d96c4a" }}>{queueNumber}</span>
+            </div>
+          )}
 
           {/* Payment Verification Notice */}
           <div style={{
@@ -227,16 +237,22 @@ function Checkout({ cart, clearCart }) {
 
           <div style={{ display: "flex", gap: "12px", justifyContent: "center", flexWrap: "wrap", marginTop: "8px" }}>
             <button
-              onClick={() => navigate(`/receipt/${orderNumber}`)}
+              onClick={() => navigate(`/track/${orderNumber}`)}
               style={{ padding: "12px 24px", background: "#d96c4a", color: "#fff", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "16px", fontWeight: "bold" }}
             >
-              📄 View Order Details
+              🔔 Track Order Live (Queue {queueNumber || orderNumber})
+            </button>
+            <button
+              onClick={() => navigate(`/receipt/${orderNumber}`)}
+              style={{ padding: "12px 24px", background: "#fff", color: "#d96c4a", border: "2px solid #d96c4a", borderRadius: "8px", cursor: "pointer", fontSize: "16px", fontWeight: "bold" }}
+            >
+              📄 View Receipt
             </button>
             <button
               onClick={() => navigate("/")}
-              style={{ padding: "12px 24px", background: "#fff", color: "#d96c4a", border: "2px solid #d96c4a", borderRadius: "8px", cursor: "pointer", fontSize: "16px", fontWeight: "bold" }}
+              style={{ padding: "12px 24px", background: "#fff", color: "#5b2d1c", border: "1px solid #f0c8bf", borderRadius: "8px", cursor: "pointer", fontSize: "16px", fontWeight: "bold" }}
             >
-              🍩 Continue Shopping
+              🍩 Shop More
             </button>
           </div>
         </div>

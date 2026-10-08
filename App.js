@@ -7,6 +7,8 @@ import Navigation from "./components/Navigation";
 import AdminLogin from "./pages/AdminLogin";
 import AdminDashboard from "./pages/AdminDashboard";
 import Receipt from "./pages/Receipt";
+import OrderTracking from "./pages/OrderTracking";
+import QueueBoard from "./pages/QueueBoard";
 import { CustomerProvider } from "./components/CustomerContext";
 import CustomerAccountModal from "./components/CustomerAccountModal";
 import { AdminRoute } from "./components/AdminRoute";
@@ -119,6 +121,9 @@ function App() {
             }
           />
           <Route path="/receipt/:orderNumber" element={<Receipt />} />
+          <Route path="/track" element={<OrderTracking />} />
+          <Route path="/track/:orderNumber" element={<OrderTracking />} />
+          <Route path="/queue" element={<QueueBoard />} />
         </Routes>
       </Router>
     </CustomerProvider>
