@@ -1498,46 +1498,118 @@ app.patch('/api/payments/:id/verify', requireAuth, (req, res) => {
     return res.status(400).json({ message: "Action must be 'verify' or 'reject'." });
   }
 
-  const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(Number(req.params.id));
-  if (!payment) {
-    return res.status(404).json({ message: 'Payment not found.' });
+  const rawId = req.params.id;
+  const numericId = Number(rawId);
+
+  // 1. Locate payment and order with multi-strategy lookup (payment id, order id, order number)
+  let payment = null;
+  let order = null;
+
+  if (!Number.isNaN(numericId)) {
+    payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(numericId);
+    if (!payment) {
+      payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(numericId);
+    }
   }
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(payment.order_id);
+  if (payment) {
+    order = db.prepare('SELECT * FROM orders WHERE id = ?').get(payment.order_id);
+  } else {
+    // Check if rawId matches an order number or numeric order id
+    order = db.prepare('SELECT * FROM orders WHERE order_number = ? OR id = ?').get(rawId, numericId || -1);
+    if (order) {
+      payment = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(order.id);
+      // Auto-heal missing payment row for this order if absent
+      if (!payment) {
+        const createPayment = db.prepare(
+          'INSERT INTO payments (order_id, payment_method, amount, status, created_at) VALUES (?, ?, ?, ?, ?)'
+        ).run(order.id, 'GCash', order.total_amount, 'Pending Verification', order.created_at || new Date().toISOString());
+        payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(Number(createPayment.lastInsertRowid));
+      }
+    }
+  }
+
+  if (!payment && !order) {
+    return res.status(404).json({ message: `Payment or order '${rawId}' not found.` });
+  }
+
   if (!order) {
     return res.status(404).json({ message: 'Associated order not found.' });
   }
 
   const now = new Date().toISOString();
+  const nextQueueNumber = order.queue_number || generateQueueNumber(order.id);
+  const nextTrackingToken = order.tracking_token || crypto.randomBytes(16).toString('hex');
+  const previousStatus = order.order_status;
+  const isVerify = action === 'verify';
+  const newOrderStatus = isVerify
+    ? (['Pending Payment', 'Awaiting Payment Verification', 'Pending'].includes(order.order_status) ? 'Confirmed' : order.order_status)
+    : 'Pending Payment';
+  const newPaymentStatus = isVerify ? 'Verified' : 'Rejected';
 
-  if (action === 'verify') {
+  const verifyTx = db.transaction(() => {
+    if (isVerify) {
+      db.prepare(
+        'UPDATE payments SET status = ?, verified_at = ?, admin_notes = ?, paid_at = COALESCE(paid_at, ?) WHERE id = ?'
+      ).run('Verified', now, admin_notes || null, now, payment.id);
+
+      db.prepare(
+        'UPDATE orders SET payment_status = ?, order_status = ?, queue_number = COALESCE(queue_number, ?), tracking_token = COALESCE(tracking_token, ?), updated_at = ? WHERE id = ?'
+      ).run('Verified', newOrderStatus, nextQueueNumber, nextTrackingToken, now, order.id);
+    } else {
+      db.prepare(
+        'UPDATE payments SET status = ?, admin_notes = ?, verified_at = ? WHERE id = ?'
+      ).run('Rejected', admin_notes || null, now, payment.id);
+
+      db.prepare(
+        'UPDATE orders SET payment_status = ?, order_status = ?, updated_at = ? WHERE id = ?'
+      ).run('Rejected', newOrderStatus, now, order.id);
+    }
+
+    // Record status history transition
     db.prepare(
-      'UPDATE payments SET status = ?, verified_at = ?, admin_notes = ?, paid_at = ? WHERE id = ?'
-    ).run('Verified', now, admin_notes || null, now, payment.id);
-    db.prepare(
-      'UPDATE orders SET payment_status = ?, order_status = ?, updated_at = ? WHERE id = ?'
-    ).run('Verified', 'Confirmed', now, order.id);
-  } else {
-    db.prepare(
-      'UPDATE payments SET status = ?, admin_notes = ? WHERE id = ?'
-    ).run('Rejected', admin_notes || null, payment.id);
-    db.prepare(
-      'UPDATE orders SET payment_status = ?, order_status = ?, updated_at = ? WHERE id = ?'
-    ).run('Rejected', 'Pending Payment', now, order.id);
+      'INSERT INTO order_status_history (order_id, previous_status, new_status, changed_by_admin_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(order.id, previousStatus, newOrderStatus, req.admin?.id || null, admin_notes || (isVerify ? 'Payment verified by staff' : 'Payment rejected by staff'), now);
+
+    // Record notification event
+    try {
+      db.prepare(
+        'INSERT OR IGNORE INTO notifications (order_id, type, channel, status, sent_at) VALUES (?, ?, ?, ?, ?)'
+      ).run(order.id, isVerify ? 'payment_verified' : 'payment_rejected', 'in_app', 'sent', now);
+    } catch (_e) {}
+  });
+
+  try {
+    verifyTx();
+  } catch (txErr) {
+    return res.status(500).json({ message: txErr.message || 'Failed to update payment status.' });
   }
 
   logAudit({
     adminId: req.admin?.id,
-    action: action === 'verify' ? 'PAYMENT_VERIFIED' : 'PAYMENT_REJECTED',
+    action: isVerify ? 'PAYMENT_VERIFIED' : 'PAYMENT_REJECTED',
     entityType: 'payment',
-    entityId: payment.id,
-    details: { orderNumber: order.order_number, amount: payment.amount, reason: admin_notes },
+    entityId: String(payment.id),
+    details: {
+      orderNumber: order.order_number,
+      queueNumber: nextQueueNumber,
+      amount: payment.amount,
+      reason: admin_notes || null,
+    },
     ipAddress: req.ip,
   });
 
   const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
   const updatedPayment = db.prepare('SELECT * FROM payments WHERE id = ?').get(payment.id);
-  return res.json({ order: updatedOrder, payment: updatedPayment });
+
+  return res.json({
+    ok: true,
+    message: isVerify
+      ? `Payment for ${order.order_number} (${nextQueueNumber}) verified! Order is now Confirmed.`
+      : `Payment for ${order.order_number} rejected.`,
+    order: updatedOrder,
+    payment: updatedPayment,
+  });
 });
 
 // ── Submit payment reference (Customer) ──────────────────────────────────────

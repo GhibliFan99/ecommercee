@@ -125,7 +125,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
   const lowStockCount = products.filter(p => Number(p.stock_quantity ?? 0) <= 5).length;
   const unclaimedOrders = orders.filter(o => o.order_status === "Ready for Pickup");
 
-  const handleVerifyPayment = (paymentId, action) => {
+  const handleVerifyPayment = (paymentOrOrderId, action) => {
     const isVerify = action === "verify";
     setConfirmInput("");
     setConfirmModal({
@@ -140,7 +140,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
       onConfirm: async (inputValue) => {
         setActionLoading(true);
         try {
-          const res = await fetch(`/api/payments/${paymentId}/verify`, {
+          const res = await fetch(`/api/payments/${paymentOrOrderId}/verify`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
             credentials: "include",
@@ -150,7 +150,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
           if (!res.ok) {
             throw new Error(data.message || "Failed to process payment verification.");
           }
-          showToast(isVerify ? "✅ Payment Verified! Order Confirmed." : "❌ Payment Rejected");
+          showToast(data.message || (isVerify ? "✅ Payment Verified! Order Confirmed." : "❌ Payment Rejected"));
           setConfirmModal(null);
           await fetchData(true);
         } catch (err) {
@@ -786,13 +786,19 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
                       </tr>
                       {expandedOrder === o.id && (
                         <tr>
-                          <td colSpan="7" style={{ padding:"0 14px 18px 40px" }}>
+                          <td colSpan="8" style={{ padding:"0 14px 18px 40px" }}>
                             <div style={{ background:"#fff8f5", border:"1px solid #f0c8bf", borderRadius:"10px", padding:"14px 18px", marginTop:"4px" }}>
-                              <div style={{ display:"flex", gap:"20px", flexWrap:"wrap", marginBottom:"12px", fontSize:"13px" }}>
+                              <div style={{ display:"flex", gap:"20px", flexWrap:"wrap", marginBottom:"12px", fontSize:"13px", alignItems:"center" }}>
                                 <div><strong>Address:</strong> {o.customer_address||"N/A"}</div>
                                 <div><strong>Method:</strong> {o.payment_method||"N/A"}</div>
                                 {o.payment_reference && <div><strong>Ref #:</strong> <code style={{ background:"#f0f0f0", padding:"1px 6px", borderRadius:"4px" }}>{o.payment_reference}</code></div>}
                                 <div><strong>Placed:</strong> {new Date(o.created_at).toLocaleString()}</div>
+                                {o.payment_status === "Pending Verification" && (
+                                  <div style={{ marginLeft:"auto", display:"flex", gap:"6px" }}>
+                                    <button className="abtn" onClick={() => handleVerifyPayment(o.id, "verify")} style={{ background:"#166534", color:"#fff", fontSize:"12px", padding:"5px 12px" }}>&#10003; Verify Payment</button>
+                                    <button className="abtn" onClick={() => handleVerifyPayment(o.id, "reject")} style={{ background:"transparent", color:"#dc2626", border:"1px solid #dc2626", fontSize:"12px", padding:"5px 12px" }}>&#10007; Reject Payment</button>
+                                  </div>
+                                )}
                               </div>
                               {o.items && o.items.length > 0 ? (
                                 <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"13px", maxWidth:"520px" }}>
