@@ -28,8 +28,29 @@ app.use(cookieParser());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-const db = new Database(dbFilePath);
-db.pragma('journal_mode = WAL');
+let resolvedDbPath = dbFilePath;
+if (process.env.VERCEL) {
+  try {
+    const tmpDb = path.join('/tmp', 'database.sqlite');
+    if (!fs.existsSync(tmpDb) && fs.existsSync(dbFilePath)) {
+      fs.copyFileSync(dbFilePath, tmpDb);
+      const shm = `${dbFilePath}-shm`;
+      const wal = `${dbFilePath}-wal`;
+      if (fs.existsSync(shm)) fs.copyFileSync(shm, `${tmpDb}-shm`);
+      if (fs.existsSync(wal)) fs.copyFileSync(wal, `${tmpDb}-wal`);
+    }
+    resolvedDbPath = fs.existsSync(tmpDb) ? tmpDb : dbFilePath;
+  } catch (err) {
+    console.warn('Could not copy sqlite to /tmp:', err.message);
+  }
+}
+
+const db = new Database(resolvedDbPath);
+try {
+  db.pragma('journal_mode = WAL');
+} catch (e) {
+  try { db.pragma('journal_mode = MEMORY'); } catch (_ignore) {}
+}
 
 function initializeDatabase() {
   db.exec(`
@@ -708,6 +729,7 @@ app.put('/api/inventory/:id', requireAuth, (req, res) => {
 });
 
 app.get('/api/orders', requireAuth, (_req, res) => {
+  cancelExpiredOrders();
   const orders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
   return res.json(orders);
 });
@@ -825,68 +847,102 @@ app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
   }
 });
 
-// ── Auto-Cancel Unpaid Orders Cron Endpoint ──────────────────────────────────
-app.post('/api/cron/auto-cancel-unpaid', (req, res) => {
-  const cronSecret = process.env.CRON_SECRET;
-  const authHeader = req.headers.authorization;
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    return res.status(401).json({ message: 'Unauthorized cron request.' });
-  }
+// ── Auto-Cancel Unpaid Orders (Lazy & Cron) ──────────────────────────────────
+/**
+ * Cancels orders in 'Pending Payment' older than 24 hours.
+ * Restores product inventory idempotently (exactly once per cancelled order).
+ */
+function cancelExpiredOrders() {
+  try {
+    const staleOrders = db.prepare(`
+      SELECT * FROM orders
+      WHERE order_status = 'Pending Payment'
+        AND datetime(created_at) <= datetime('now', '-24 hours')
+    `).all();
 
-  // Find orders pending payment for more than 24 hours
-  const staleOrders = db.prepare(`
-    SELECT * FROM orders
-    WHERE order_status = 'Pending Payment'
-      AND datetime(created_at) <= datetime('now', '-24 hours')
-  `).all();
+    if (!staleOrders || staleOrders.length === 0) {
+      return { ok: true, cancelledCount: 0 };
+    }
 
-  let cancelledCount = 0;
+    let cancelledCount = 0;
 
-  const cancelTx = db.transaction(() => {
-    for (const order of staleOrders) {
-      // Check if already restored
-      const alreadyRestored = db.prepare(
-        'SELECT id FROM order_status_history WHERE order_id = ? AND stock_restored = 1'
-      ).get(order.id);
+    const cancelTx = db.transaction(() => {
+      for (const order of staleOrders) {
+        // Re-check order status inside transaction for idempotency
+        const current = db.prepare('SELECT id, order_status FROM orders WHERE id = ?').get(order.id);
+        if (!current || current.order_status !== 'Pending Payment') {
+          continue;
+        }
 
-      if (!alreadyRestored) {
-        const items = db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(order.id);
-        for (const item of items) {
-          const prod = db.prepare('SELECT id, name, stock_quantity FROM products WHERE id = ?').get(item.product_id);
-          if (prod) {
-            db.prepare(
-              'UPDATE products SET stock_quantity = stock_quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-            ).run(item.quantity, prod.id);
+        // Check if stock was already restored for this order
+        const alreadyRestored = db.prepare(
+          'SELECT id FROM order_status_history WHERE order_id = ? AND stock_restored = 1'
+        ).get(order.id);
 
-            db.prepare(
-              'INSERT INTO stock_adjustments (product_id, change_amount, previous_stock, new_stock, reason, order_id) VALUES (?, ?, ?, ?, ?, ?)'
-            ).run(
-              prod.id,
-              item.quantity,
-              prod.stock_quantity,
-              prod.stock_quantity + item.quantity,
-              `Auto-cancel 24h unpaid: ${order.order_number}`,
-              order.id
-            );
+        if (!alreadyRestored) {
+          const items = db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(order.id);
+          for (const item of items) {
+            const prod = db.prepare('SELECT id, name, stock_quantity FROM products WHERE id = ?').get(item.product_id);
+            if (prod) {
+              db.prepare(
+                'UPDATE products SET stock_quantity = stock_quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+              ).run(item.quantity, prod.id);
+
+              db.prepare(
+                'INSERT INTO stock_adjustments (product_id, change_amount, previous_stock, new_stock, reason, order_id) VALUES (?, ?, ?, ?, ?, ?)'
+              ).run(
+                prod.id,
+                item.quantity,
+                prod.stock_quantity,
+                prod.stock_quantity + item.quantity,
+                `Auto-cancel 24h unpaid: ${order.order_number}`,
+                order.id
+              );
+            }
           }
         }
+
+        db.prepare("UPDATE orders SET order_status = 'Cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(order.id);
+        db.prepare(
+          'INSERT INTO order_status_history (order_id, previous_status, new_status, note, stock_restored) VALUES (?, ?, ?, ?, 1)'
+        ).run(order.id, 'Pending Payment', 'Cancelled', 'Auto-cancelled: unpaid for 24 hours');
+
+        cancelledCount++;
       }
+    });
 
-      db.prepare("UPDATE orders SET order_status = 'Cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(order.id);
-      db.prepare(
-        'INSERT INTO order_status_history (order_id, previous_status, new_status, note, stock_restored) VALUES (?, ?, ?, ?, 1)'
-      ).run(order.id, order.order_status, 'Cancelled', 'Auto-cancelled: unpaid for 24 hours');
-
-      cancelledCount++;
-    }
-  });
-
-  try {
     cancelTx();
-    return res.json({ ok: true, cancelledCount, message: `Auto-cancelled ${cancelledCount} unpaid orders.` });
+    return { ok: true, cancelledCount };
   } catch (err) {
-    return res.status(500).json({ message: err.message || 'Auto-cancel cron failed.' });
+    console.error('Error in cancelExpiredOrders:', err);
+    return { ok: false, error: err.message, cancelledCount: 0 };
   }
+}
+
+// ── Auto-Cancel Unpaid Orders Cron Endpoint ──────────────────────────────────
+// Protected with CRON_SECRET (Authorization: Bearer <CRON_SECRET>)
+// Idempotent: safe to run multiple times without duplicate stock restorations
+app.all('/api/cron/auto-cancel-unpaid', (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  const authHeader = req.headers.authorization;
+  if (cronSecret) {
+    if (authHeader !== `Bearer ${cronSecret}`) {
+      return res.status(401).json({ message: 'Unauthorized cron request: invalid or missing CRON_SECRET token.' });
+    }
+  } else if (process.env.NODE_ENV === 'production') {
+    return res.status(401).json({ message: 'CRON_SECRET must be configured in production.' });
+  }
+
+  const result = cancelExpiredOrders();
+  if (!result.ok) {
+    return res.status(500).json({ message: result.error || 'Failed to auto-cancel orders.' });
+  }
+
+  return res.json({
+    ok: true,
+    cancelledCount: result.cancelledCount,
+    message: `Auto-cancelled ${result.cancelledCount} unpaid order(s).`,
+  });
 });
 
 // ── Payment Verification (Admin) ──────────────────────────────────────────────
@@ -971,6 +1027,9 @@ app.patch('/api/orders/:id/payment-reference', (req, res) => {
 
 // ── Storefront Checkout: Create Order ────────────────────────────────────────
 app.post('/api/orders', (req, res) => {
+  // Lazily expire overdue unpaid orders to restore inventory prior to checkout
+  cancelExpiredOrders();
+
   const {
     customer,
     paymentMethod,
@@ -1161,6 +1220,7 @@ app.get('/api/payments', requireAuth, (_req, res) => {
 });
 
 app.get('/api/sales', requireAuth, (_req, res) => {
+  cancelExpiredOrders();
   const stats = db.prepare(`
     SELECT
       COUNT(*) AS total_orders,
@@ -1240,4 +1300,4 @@ function startServer() {
 
 startServer();
 
-export { app, initializeDatabase, db };
+export { app, initializeDatabase, db, cancelExpiredOrders };
