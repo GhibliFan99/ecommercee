@@ -13,6 +13,13 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { checkRateLimit, recordFailedAttempt, resetRateLimit } from './middleware/rateLimiter.js';
+import { getBestSellers } from './services/analyticsService.js';
+import {
+  getLastCallSettings,
+  updateLastCallSettings,
+  evaluateLastCallDeals,
+  getActiveDealsMap,
+} from './services/lastCallService.js';
 
 dotenv.config();
 
@@ -480,12 +487,23 @@ function requireRole(allowedRoles) {
   };
 }
 
-function sanitizeProduct(product) {
+function sanitizeProduct(product, activeDealsMap = null) {
+  const origPrice = Number(product.price);
+  const deal = activeDealsMap ? activeDealsMap.get(product.id) : null;
+  const isDeal = Boolean(deal);
+  const discountPct = isDeal ? deal.discount_percentage : 0;
+  const discountedPrice = isDeal ? Number(deal.discounted_price) : origPrice;
+
   return {
     id: product.id,
     name: product.name,
     description: product.description,
-    price: Number(product.price),
+    price: isDeal ? discountedPrice : origPrice,
+    original_price: origPrice,
+    discount_percentage: discountPct,
+    discounted_price: isDeal ? discountedPrice : null,
+    is_last_call: isDeal,
+    last_call_status: isDeal ? deal.status : null,
     image: product.image,
     stock_quantity: Number(product.stock_quantity),
     availability: Boolean(product.availability),
@@ -516,17 +534,17 @@ app.post('/api/admin/login', async (req, res) => {
     return res.status(429).json({ message: limitStatus.message });
   }
 
-  const isGrace = cleanUser === 'grace' || cleanUser === 'grace@glazydays.com';
-  const isAdminUser = cleanUser === 'admin' || cleanUser === 'admin@glazydays.com';
+  const isGrace = cleanUser === 'grace' || cleanUser === 'grace123' || cleanUser === 'grace@glazydays.com';
+  const isAdminUser = cleanUser === 'admin' || cleanUser === 'admin123' || cleanUser === 'admin@glazydays.com';
 
   // 2. Query admin from database
   let admin = db.prepare(`
     SELECT * FROM admins 
     WHERE LOWER(username) = ? 
        OR LOWER(email) = ? 
-       OR (LOWER(email) = 'grace@glazydays.com' AND ? = 'grace')
-       OR (LOWER(username) = 'grace' AND ? = 'grace@glazydays.com')
-  `).get(cleanUser, cleanUser, cleanUser, cleanUser);
+       OR (LOWER(username) = 'grace' AND (? = 'grace' OR ? = 'grace123' OR ? = 'grace@glazydays.com'))
+       OR (LOWER(username) = 'admin' AND (? = 'admin' OR ? = 'admin123' OR ? = 'admin@glazydays.com'))
+  `).get(cleanUser, cleanUser, cleanUser, cleanUser, cleanUser, cleanUser, cleanUser, cleanUser);
 
   // Auto-seed if running on fresh serverless cold-start or empty database
   if (!admin) {
@@ -765,8 +783,9 @@ app.get('/api/admin/customers', requireAuth, (_req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/api/products', (_req, res) => {
+  const dealsMap = getActiveDealsMap(db);
   const rows = db.prepare('SELECT * FROM products ORDER BY id ASC').all();
-  return res.json(rows.map(sanitizeProduct));
+  return res.json(rows.map((p) => sanitizeProduct(p, dealsMap)));
 });
 
 
@@ -775,7 +794,8 @@ app.get('/api/products/:id', (req, res) => {
   if (!product) {
     return res.status(404).json({ message: 'Product not found.' });
   }
-  return res.json(sanitizeProduct(product));
+  const dealsMap = getActiveDealsMap(db);
+  return res.json(sanitizeProduct(product, dealsMap));
 });
 
 app.post('/api/products', requireAuth, (req, res) => {
@@ -869,8 +889,9 @@ app.delete('/api/products/:id', requireAuth, requireRole(['owner']), (req, res) 
 });
 
 app.get('/api/inventory', requireAuth, (_req, res) => {
+  const dealsMap = getActiveDealsMap(db);
   const rows = db.prepare('SELECT * FROM products ORDER BY id ASC').all();
-  return res.json(rows.map(sanitizeProduct));
+  return res.json(rows.map((p) => sanitizeProduct(p, dealsMap)));
 });
 
 app.put('/api/inventory/:id', requireAuth, (req, res) => {
@@ -1706,8 +1727,11 @@ app.post('/api/orders', (req, res) => {
         throw new Error(`Insufficient stock for ${product.name}. Only ${product.stock_quantity} available.`);
       }
 
-      const unitPrice = Number(product.price);
-      const subtotal = unitPrice * quantity;
+      // Calculate unit price strictly from the database, applying active Last Call Deals if in effect
+      const dealsMap = getActiveDealsMap(db);
+      const activeDeal = dealsMap.get(product.id);
+      const unitPrice = activeDeal ? Number(activeDeal.discounted_price) : Number(product.price);
+      const subtotal = Number((unitPrice * quantity).toFixed(2));
 
       normalizedItems.push({
         product,
@@ -1864,6 +1888,102 @@ app.get('/api/sales', requireAuth, (_req, res) => {
   return res.json({ stats, history });
 });
 
+// ── Best Seller Analytics ────────────────────────────────────────────────────
+app.get('/api/analytics/best-sellers', requireAuth, (req, res) => {
+  try {
+    const data = getBestSellers(db, req.query);
+    return res.json(data);
+  } catch (err) {
+    console.error('Best sellers error:', err);
+    return res.status(500).json({ message: 'Failed to calculate best seller statistics.' });
+  }
+});
+
+// ── Last Call Deals ──────────────────────────────────────────────────────────
+// Public endpoint for storefront banner & deals list
+app.get('/api/last-call/deals', (_req, res) => {
+  try {
+    const data = evaluateLastCallDeals(db);
+    return res.json({
+      windowStatus: data.windowStatus,
+      activeDeals: data.activeDeals,
+      settings: {
+        startTime: data.settings.startTime,
+        endTime: data.settings.endTime,
+        enabled: data.settings.enabled,
+        manualOverride: data.settings.manualOverride,
+      },
+    });
+  } catch (err) {
+    console.error('Last call deals error:', err);
+    return res.status(500).json({ message: 'Failed to fetch last call deals.' });
+  }
+});
+
+// Admin endpoint for configuration & real-time inventory preview
+app.get('/api/admin/last-call/settings', requireAuth, (_req, res) => {
+  try {
+    const data = evaluateLastCallDeals(db);
+    return res.json(data);
+  } catch (err) {
+    console.error('Admin last call settings error:', err);
+    return res.status(500).json({ message: 'Failed to fetch last call configuration.' });
+  }
+});
+
+app.put('/api/admin/last-call/settings', requireAuth, (req, res) => {
+  try {
+    const updated = updateLastCallSettings(db, req.body);
+    const data = evaluateLastCallDeals(db, updated);
+
+    logAudit({
+      adminId: req.admin?.id,
+      action: 'UPDATE_LAST_CALL_SETTINGS',
+      entityType: 'settings',
+      entityId: 'last_call_settings',
+      details: req.body,
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      message: 'Last Call Deal rules updated successfully.',
+      ...data,
+    });
+  } catch (err) {
+    console.error('Update last call settings error:', err);
+    return res.status(400).json({ message: err.message || 'Failed to update last call rules.' });
+  }
+});
+
+app.post('/api/admin/last-call/toggle-override', requireAuth, (req, res) => {
+  try {
+    const { mode } = req.body || {};
+    if (!['auto', 'force_on', 'force_off'].includes(mode)) {
+      return res.status(400).json({ message: "Invalid mode. Choose 'auto', 'force_on', or 'force_off'." });
+    }
+    const current = getLastCallSettings(db);
+    const updated = updateLastCallSettings(db, { ...current, manualOverride: mode });
+    const data = evaluateLastCallDeals(db, updated);
+
+    logAudit({
+      adminId: req.admin?.id,
+      action: 'TOGGLE_LAST_CALL_OVERRIDE',
+      entityType: 'settings',
+      entityId: 'last_call_settings',
+      details: { mode },
+      ipAddress: req.ip,
+    });
+
+    return res.json({
+      message: `Last Call Deal mode changed to ${mode}.`,
+      ...data,
+    });
+  } catch (err) {
+    console.error('Toggle override error:', err);
+    return res.status(500).json({ message: 'Failed to toggle override.' });
+  }
+});
+
 app.get('/api/receipts/:orderNumber', (req, res) => {
   const order = db.prepare('SELECT * FROM orders WHERE order_number = ?').get(req.params.orderNumber);
   if (!order) {
@@ -1899,6 +2019,77 @@ app.get('/api/receipts/:orderNumber', (req, res) => {
   return res.json(receipt);
 });
 
+// ── Best Sellers Report ────────────────────────────────────────────────────────
+app.get('/api/reports/best-sellers', requireAuth, (req, res) => {
+  try {
+    const { period = 'all', startDate, endDate, limit = 10 } = req.query;
+    const result = getBestSellers(db, { period, startDate, endDate, limit: Number(limit) });
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('Best sellers error:', err);
+    return res.status(500).json({ message: 'Failed to load best sellers.' });
+  }
+});
+
+// ── Sales Rate (monthly revenue by period) ────────────────────────────────────
+app.get('/api/reports/sales-rate', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        strftime('%Y-%m', o.created_at) AS month,
+        COALESCE(SUM(o.total_amount), 0) AS revenue,
+        COUNT(DISTINCT o.id) AS order_count
+      FROM orders o
+      WHERE o.order_status != 'Cancelled'
+        AND o.payment_status = 'Verified'
+      GROUP BY month
+      ORDER BY month ASC
+      LIMIT 12
+    `).all();
+    return res.json({ ok: true, salesRate: rows });
+  } catch (err) {
+    console.error('Sales rate error:', err);
+    return res.status(500).json({ message: 'Failed to load sales rate.' });
+  }
+});
+
+// ── Last Call Deals ────────────────────────────────────────────────────────────
+app.get('/api/deals/last-call', requireAuth, (req, res) => {
+  try {
+    const result = evaluateLastCallDeals(db);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('Last call deals error:', err);
+    return res.status(500).json({ message: 'Failed to load last call deals.' });
+  }
+});
+
+app.get('/api/deals/last-call/settings', requireAuth, (req, res) => {
+  try {
+    const settings = getLastCallSettings(db);
+    return res.json({ ok: true, settings });
+  } catch (err) {
+    return res.status(500).json({ message: 'Failed to load settings.' });
+  }
+});
+
+app.put('/api/deals/last-call/settings', requireAuth, requireRole(['owner']), (req, res) => {
+  try {
+    const updated = updateLastCallSettings(db, req.body || {});
+    logAudit({
+      adminId: req.admin?.id,
+      action: 'LAST_CALL_SETTINGS_UPDATED',
+      entityType: 'settings',
+      details: updated,
+      ipAddress: req.ip,
+    });
+    return res.json({ ok: true, settings: updated });
+  } catch (err) {
+    console.error('Update last call settings error:', err);
+    return res.status(500).json({ message: 'Failed to update settings.' });
+  }
+});
+
 app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ message: 'Internal server error.' });
@@ -1907,6 +2098,7 @@ app.use((err, _req, res, _next) => {
 function startServer() {
   if (
     process.env.NODE_ENV === 'test' ||
+    process.env.NODE_TEST_CONTEXT ||
     process.argv.includes('--test') ||
     process.execArgv.includes('--test') ||
     process.env.VERCEL

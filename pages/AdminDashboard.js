@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { donuts, getDonutImage } from "../data/donuts";
 import "../styles/App.css";
@@ -21,6 +21,142 @@ function orderStatusBadge(status) {
   if (["Pending Payment","Awaiting Payment Verification"].includes(s)) return badge(s, "#fef3c7", "#92400e");
   if (s === "Cancelled") return badge(s, "#fee2e2", "#dc2626");
   return badge(s, "#f3f4f6", "#374151");
+}
+
+// ── SVG Best Seller Bar Chart ─────────────────────────────────────────────────
+function BestSellerBarChart({ data = [], tall = false }) {
+  const chartH = tall ? 260 : 180;
+  const padding = { top: 22, right: 16, bottom: 65, left: 44 };
+  const svgW = 520;
+  const svgH = chartH + padding.top + padding.bottom;
+  const plotW = svgW - padding.left - padding.right;
+  const plotH = chartH;
+
+  const maxUnits = Math.max(...data.map(d => d.unitsSold), 1);
+  const barColors = ["#d96c4a","#e8957a","#f0b8a2","#f5cfc0","#f9e4dc","#fdf1ee"];
+
+  // Ensure bars always have an elegant, proportioned width (never bloated or stretched)
+  const slots = Math.max(data.length, 6);
+  const slotW = plotW / slots;
+  const barW = Math.min(36, slotW * 0.65);
+
+  return (
+    <svg viewBox={`0 0 ${svgW} ${svgH}`} style={{ width:"100%", height:"auto", overflow:"visible" }}>
+      {/* Y-axis gridlines */}
+      {[0,0.25,0.5,0.75,1].map(t => {
+        const y = padding.top + plotH * (1 - t);
+        const val = Math.round(maxUnits * t);
+        return (
+          <g key={t}>
+            <line x1={padding.left} y1={y} x2={padding.left + plotW} y2={y}
+              stroke="#f0c8bf" strokeWidth="1" strokeDasharray={t===0?"":"4 3"} />
+            <text x={padding.left - 6} y={y + 4} textAnchor="end" fill="#b08880" fontSize="10">{val}</text>
+          </g>
+        );
+      })}
+      {/* Bars */}
+      {data.map((d, i) => {
+        const x = padding.left + i * slotW + (slotW - barW) / 2;
+        const barH = d.unitsSold > 0 ? Math.max(4, (d.unitsSold / maxUnits) * plotH) : 2;
+        const y = padding.top + plotH - barH;
+        const color = d.unitsSold > 0 ? barColors[i % barColors.length] : "#edd6ce";
+        return (
+          <g key={d.productId || i}>
+            <rect x={x} y={y} width={barW} height={barH} rx="5" fill={color} opacity="0.95" />
+            {/* Value label */}
+            <text
+              x={x + barW/2}
+              y={d.unitsSold > 0 ? y - 6 : y - 4}
+              textAnchor="middle"
+              fill={d.unitsSold > 0 ? (i === 0 ? "#d96c4a" : "#b08880") : "#c7a9a0"}
+              fontSize="11"
+              fontWeight="800"
+            >
+              {d.unitsSold}
+            </text>
+            {/* Product name — rotated */}
+            <text
+              x={x + barW/2}
+              y={padding.top + plotH + 12}
+              textAnchor="end"
+              fill={d.unitsSold > 0 ? "#5b2d1c" : "#a88a80"}
+              fontSize="10"
+              fontWeight={d.unitsSold > 0 ? 700 : 500}
+              transform={`rotate(-35,${x + barW/2},${padding.top + plotH + 12})`}
+            >
+              {d.productName.length > 12 ? d.productName.slice(0,12)+"…" : d.productName}
+            </text>
+          </g>
+        );
+      })}
+      {/* Y-axis */}
+      <line x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top+plotH} stroke="#f0c8bf" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+// ── SVG Sales Rate Area Chart ─────────────────────────────────────────────────
+function SalesRateAreaChart({ data = [] }) {
+  const padding = { top: 16, right: 10, bottom: 44, left: 54 };
+  const svgW = 520;
+  const chartH = 180;
+  const svgH = chartH + padding.top + padding.bottom;
+  const plotW = svgW - padding.left - padding.right;
+  const plotH = chartH;
+
+  const maxRev = Math.max(...data.map(d => Number(d.revenue || 0)), 1);
+
+  const pts = data.map((d, i) => {
+    const x = padding.left + (i / Math.max(data.length - 1, 1)) * plotW;
+    const y = padding.top + plotH - (Number(d.revenue) / maxRev) * plotH;
+    return { x, y, d };
+  });
+
+  const pathD = pts.map((p, i) => `${i===0?"M":"L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const areaD = `${pathD} L${(padding.left + plotW).toFixed(1)},${(padding.top+plotH).toFixed(1)} L${padding.left.toFixed(1)},${(padding.top+plotH).toFixed(1)} Z`;
+
+  const fmtMonth = (ym) => {
+    if (!ym) return "";
+    const [y, m] = ym.split("-");
+    const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    return `${months[(Number(m)-1)%12]}`;
+  };
+
+  return (
+    <svg viewBox={`0 0 ${svgW} ${svgH}`} style={{ width:"100%", height:"auto", overflow:"visible" }}>
+      <defs>
+        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#d96c4a" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="#d96c4a" stopOpacity="0.03" />
+        </linearGradient>
+      </defs>
+      {/* Gridlines */}
+      {[0,0.25,0.5,0.75,1].map(t => {
+        const y = padding.top + plotH * (1 - t);
+        const val = (maxRev * t).toFixed(0);
+        return (
+          <g key={t}>
+            <line x1={padding.left} y1={y} x2={padding.left+plotW} y2={y} stroke="#f0c8bf" strokeWidth="1" strokeDasharray={t===0?"":"4 3"} />
+            <text x={padding.left-6} y={y+4} textAnchor="end" fill="#b08880" fontSize="9">₱{Number(val).toLocaleString()}</text>
+          </g>
+        );
+      })}
+      {/* Area fill */}
+      {pts.length > 1 && <path d={areaD} fill="url(#areaGrad)" />}
+      {/* Line */}
+      {pts.length > 1 && <path d={pathD} fill="none" stroke="#d96c4a" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />}
+      {/* Dots */}
+      {pts.map((p, i) => (
+        <circle key={i} cx={p.x} cy={p.y} r="4" fill="#fff" stroke="#d96c4a" strokeWidth="2" />
+      ))}
+      {/* X-axis labels */}
+      {pts.map((p, i) => (
+        <text key={i} x={p.x} y={padding.top+plotH+14} textAnchor="middle" fill="#9a7060" fontSize="9">{fmtMonth(p.d.month)}</text>
+      ))}
+      {/* Y-axis */}
+      <line x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top+plotH} stroke="#f0c8bf" strokeWidth="1.5" />
+    </svg>
+  );
 }
 
 function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
@@ -47,6 +183,19 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
   const [confirmInput, setConfirmInput] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
+  // Best Seller Chart & Sales Rate state
+  const [bestSellers, setBestSellers] = useState([]);
+  const [bestSellerPeriod, setBestSellerPeriod] = useState("month");
+  const [customStartDate, setCustomStartDate] = useState("");
+  const [customEndDate, setCustomEndDate] = useState("");
+  const [salesRate, setSalesRate] = useState([]);
+  const [lastCallData, setLastCallData] = useState(null);
+  const [lastCallSettings, setLastCallSettings] = useState(null);
+  const [savingLCSettings, setSavingLCSettings] = useState(false);
+  const [lcSettingsForm, setLcSettingsForm] = useState(null);
+  const bestSellerBarRef = useRef(null);
+  const salesRateRef = useRef(null);
+
   // Ready / Unclaimed orders and Claim QR verification
   const [claimModal, setClaimModal] = useState(null); // { order } or true
   const [claimInput, setClaimInput] = useState("");
@@ -64,13 +213,64 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 3500); };
 
+  const fetchBestSellers = useCallback(async (period = "month", customStart = null, customEnd = null) => {
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      let url = `/api/reports/best-sellers?period=${period}&limit=8`;
+      if (period === "custom") {
+        if (customStart) url += `&startDate=${encodeURIComponent(customStart)}`;
+        if (customEnd) url += `&endDate=${encodeURIComponent(customEnd)}`;
+      }
+      const res = await fetch(url, { headers, credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setBestSellers(data.bestSellers || []);
+      }
+    } catch (err) {
+      console.error("Best sellers fetch error:", err);
+    }
+  }, [token]);
+
+  const fetchSalesRate = useCallback(async () => {
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await fetch("/api/reports/sales-rate", { headers, credentials: "include" });
+      if (res.ok) {
+        const data = await res.json();
+        setSalesRate(data.salesRate || []);
+      }
+    } catch (err) {
+      console.error("Sales rate fetch error:", err);
+    }
+  }, [token]);
+
+  const fetchLastCallData = useCallback(async () => {
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const [dealsRes, settingsRes] = await Promise.all([
+        fetch("/api/deals/last-call", { headers, credentials: "include" }),
+        fetch("/api/deals/last-call/settings", { headers, credentials: "include" }),
+      ]);
+      if (dealsRes.ok) {
+        const data = await dealsRes.json();
+        setLastCallData(data);
+      }
+      if (settingsRes.ok) {
+        const data = await settingsRes.json();
+        setLastCallSettings(data.settings);
+        setLcSettingsForm(data.settings);
+      }
+    } catch (err) {
+      console.error("Last call fetch error:", err);
+    }
+  }, [token]);
+
   const fetchData = useCallback(async (isSilent = false) => {
     if (!isSilent) setLoading(true);
     else setIsRefreshing(true);
     try {
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
-      const [salesRes, productsRes, ordersRes, customersRes, paymentsRes] = await Promise.all([
-        fetch("/api/sales", { headers, credentials: "include" }),
+      const [productsRes, ordersRes, customersRes, paymentsRes] = await Promise.all([
         fetch("/api/products"),
         fetch("/api/orders", { headers, credentials: "include" }),
         fetch("/api/admin/customers", { headers, credentials: "include" }),
@@ -104,6 +304,9 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
 
   useEffect(() => {
     fetchData();
+    fetchBestSellers("month");
+    fetchSalesRate();
+    fetchLastCallData();
     // 15-second background polling to catch new storefront orders automatically
     const interval = setInterval(() => {
       fetchData(true);
@@ -115,7 +318,17 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
       clearInterval(interval);
       clearInterval(ticker);
     };
-  }, [fetchData]);
+  }, [fetchData, fetchBestSellers, fetchSalesRate, fetchLastCallData]);
+
+  useEffect(() => {
+    if (bestSellerPeriod === "custom") {
+      if (customStartDate && customEndDate) {
+        fetchBestSellers("custom", customStartDate, customEndDate);
+      }
+    } else {
+      fetchBestSellers(bestSellerPeriod);
+    }
+  }, [bestSellerPeriod, customStartDate, customEndDate, fetchBestSellers]);
 
   const totalSales = orders.filter(o => o.payment_status === "Verified" || o.order_status === "Confirmed" || o.order_status === "Completed").reduce((s, o) => s + Number(o.total_amount || 0), 0);
   const pendingCount = payments.filter(p => p.status === "Pending Verification").length;
@@ -390,13 +603,15 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
   if (loading) return <div style={{ padding:"80px", textAlign:"center", color:"#5b2d1c" }}><div style={{ fontSize:"40px", marginBottom:"16px" }}>🍩</div>Loading Admin Dashboard...</div>;
 
   const TABS = [
-    { id:"overview",  icon:"📊", label:"Overview" },
-    { id:"unclaimed", icon:"🔔", label:"Ready / Claim", badge: unclaimedOrders.length>0 ? `${unclaimedOrders.length} ready` : null, bc:"#dcfce7", btc:"#166534" },
-    { id:"payments",  icon:"💳", label:"Payments",  badge: pendingCount>0 ? pendingCount : null, bc:"#fef3c7", btc:"#92400e" },
-    { id:"orders",    icon:"📦", label:"Orders",    badge: orders.length>0 ? orders.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
-    { id:"products",  icon:"🍩", label:"Products",  badge: products.length>0 ? products.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
-    { id:"inventory", icon:"📋", label:"Inventory", badge: lowStockCount>0 ? `${lowStockCount} low` : null, bc:"#fee2e2", btc:"#dc2626" },
-    { id:"customers", icon:"👥", label:"Customers", badge: customers.length>0 ? customers.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
+    { id:"overview",    icon:"📊", label:"Overview" },
+    { id:"best-sellers",icon:"🏆", label:"Best Sellers" },
+    { id:"last-call",   icon:"🔥", label:"Last Call Deals", badge: lastCallData?.activeDealCount > 0 ? `${lastCallData.activeDealCount} live` : null, bc:"#fce7d4", btc:"#c2410c" },
+    { id:"unclaimed",   icon:"🔔", label:"Ready / Claim", badge: unclaimedOrders.length>0 ? `${unclaimedOrders.length} ready` : null, bc:"#dcfce7", btc:"#166534" },
+    { id:"payments",    icon:"💳", label:"Payments",  badge: pendingCount>0 ? pendingCount : null, bc:"#fef3c7", btc:"#92400e" },
+    { id:"orders",      icon:"📦", label:"Orders",    badge: orders.length>0 ? orders.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
+    { id:"products",    icon:"🍩", label:"Products",  badge: products.length>0 ? products.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
+    { id:"inventory",   icon:"📋", label:"Inventory", badge: lowStockCount>0 ? `${lowStockCount} low` : null, bc:"#fee2e2", btc:"#dc2626" },
+    { id:"customers",   icon:"👥", label:"Customers", badge: customers.length>0 ? customers.length : null, bc:"#f0c8bf", btc:"#5b2d1c" },
   ];
 
   return (
@@ -414,6 +629,7 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
           .admin-sidebar-footer a, .admin-sidebar-footer button { flex:1 !important; padding:8px 12px !important; font-size:12px !important; }
           .admin-main { padding:16px 12px 40px !important; }
           .admin-stats-grid { grid-template-columns:repeat(2,1fr) !important; gap:10px !important; }
+          .charts-row { grid-template-columns:1fr !important; }
         }
         .abtn { cursor:pointer; border:none; border-radius:6px; padding:6px 12px; font-weight:700; font-size:12px; transition:opacity .15s; }
         .abtn:hover { opacity:.85; }
@@ -493,18 +709,30 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
 
         {activeTab === "overview" && (
           <div>
-            <h1 style={{ color:"#5b2d1c", marginBottom:"8px" }}>Dashboard Overview</h1>
-            <p style={{ color:"#888", marginBottom:"24px", fontSize:"13px" }}>Welcome back! Here is what is happening at Glazy Days today.</p>
-            <div className="admin-stats-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:"14px", marginBottom:"28px" }}>
-              {[["Total Sales",`\u20B1${totalSales.toFixed(2)}`,"#d96c4a"],["Total Orders",orders.length,"#5b2d1c"],["Pending Verification",pendingCount,"#92400e"],["Verified Payments",verifiedCount,"#166534"],["Completed",completedCount,"#1d4ed8"],["Cancelled",cancelledCount,"#dc2626"],["Customers",customers.length,"#6b4a3d"]].map(([l,v,c]) => (
-                <div key={l} className="admin-stat-card" style={{ background:"#fff", borderRadius:"12px", padding:"16px", border:"1px solid #f0c8bf" }}>
-                  <p style={{ margin:0, color:"#7a5246", fontSize:"11px", fontWeight:600 }}>{l}</p>
-                  <h3 style={{ margin:"8px 0 0", color:c, fontSize:"26px", fontWeight:800 }}>{v}</h3>
+            <h1 style={{ color:"#5b2d1c", marginBottom:"4px", fontSize:"24px", fontWeight:800 }}>Dashboard Overview</h1>
+            <p style={{ color:"#999", marginBottom:"24px", fontSize:"13px" }}>Welcome back, {currentAdmin?.username}! Here is a live snapshot of Glazy Days.</p>
+
+            {/* ── Stats Row ── */}
+            <div className="admin-stats-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(155px,1fr))", gap:"14px", marginBottom:"24px" }}>
+              {[
+                { label:"Total Revenue",  value:`₱${totalSales.toFixed(2)}`, color:"#d96c4a", icon:"💰" },
+                { label:"Total Orders",   value:orders.length,               color:"#5b2d1c", icon:"📦" },
+                { label:"Pending Verify", value:pendingCount,                 color:"#92400e", icon:"⏳" },
+                { label:"Verified",       value:verifiedCount,                color:"#166534", icon:"✅" },
+                { label:"Completed",      value:completedCount,               color:"#1d4ed8", icon:"🏁" },
+                { label:"Customers",      value:customers.length,             color:"#7c3aed", icon:"👥" },
+                { label:"Live Deals 🔥",  value:lastCallData?.activeDealCount ?? "—", color:"#c2410c", icon:"🏷️" },
+              ].map(({ label, value, color, icon }) => (
+                <div key={label} className="admin-stat-card" style={{ background:"#fff", borderRadius:"16px", padding:"18px 16px", border:"1.5px solid #f0c8bf", display:"flex", flexDirection:"column", gap:"6px" }}>
+                  <div style={{ fontSize:"22px" }}>{icon}</div>
+                  <p style={{ margin:0, color:"#9a7060", fontSize:"11px", fontWeight:700, letterSpacing:"0.5px", textTransform:"uppercase" }}>{label}</p>
+                  <h3 style={{ margin:0, color, fontSize:"26px", fontWeight:900 }}>{value}</h3>
                 </div>
               ))}
             </div>
+
             {pendingCount > 0 && (
-              <div style={{ background:"#fffbea", border:"1.5px solid #f6c90e", borderRadius:"12px", padding:"14px 18px", marginBottom:"24px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:"12px" }}>
+              <div style={{ background:"#fffbea", border:"1.5px solid #f6c90e", borderRadius:"12px", padding:"14px 18px", marginBottom:"22px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:"12px" }}>
                 <div>
                   <strong style={{ color:"#92400e" }}>&#9888; {pendingCount} payment{pendingCount>1?"s":""} awaiting verification!</strong>
                   <div style={{ fontSize:"12px", color:"#92400e", marginTop:"2px" }}>Buyers are waiting for their orders to be confirmed.</div>
@@ -512,27 +740,330 @@ function AdminDashboard({ currentAdmin: propAdmin, onLogout }) {
                 <button className="abtn" onClick={() => setActiveTab("payments")} style={{ background:"#d96c4a", color:"#fff", padding:"8px 16px", fontSize:"13px" }}>Review Payments &rarr;</button>
               </div>
             )}
-            <div style={{ background:"#fff", borderRadius:"12px", border:"1px solid #f0c8bf", overflow:"hidden" }}>
+
+            {/* ── Charts Row ── */}
+            <div className="charts-row" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"18px", marginBottom:"22px" }}>
+
+              {/* Best Seller Bar Chart */}
+              <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", padding:"20px", minHeight:"280px" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"12px", flexWrap:"wrap", gap:"8px" }}>
+                  <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"16px", fontWeight:800 }}>🏆 Best Seller</h2>
+                  <div style={{ display:"flex", gap:"6px", flexWrap:"wrap" }}>
+                    {["today","week","month","all","custom"].map(p => (
+                      <button key={p} onClick={() => setBestSellerPeriod(p)}
+                        style={{ padding:"4px 10px", borderRadius:"16px", border:"1.5px solid", cursor:"pointer", fontSize:"11px", fontWeight:700,
+                          borderColor: bestSellerPeriod===p ? "#d96c4a" : "#f0c8bf",
+                          background: bestSellerPeriod===p ? "#d96c4a" : "#fff8f5",
+                          color: bestSellerPeriod===p ? "#fff" : "#9a7060" }}>
+                        {p === "custom" ? "Custom" : p.charAt(0).toUpperCase()+p.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {bestSellerPeriod === "custom" && (
+                  <div style={{ display:"flex", alignItems:"center", gap:"8px", marginBottom:"12px", padding:"8px 12px", background:"#fff8f5", borderRadius:"10px", border:"1px solid #f0c8bf", flexWrap:"wrap", fontSize:"12px" }}>
+                    <span style={{ color:"#9a7060", fontWeight:700 }}>Range:</span>
+                    <input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)}
+                      style={{ padding:"3px 8px", borderRadius:"6px", border:"1px solid #f0c8bf", fontSize:"11px" }} />
+                    <span style={{ color:"#9a7060" }}>to</span>
+                    <input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)}
+                      style={{ padding:"3px 8px", borderRadius:"6px", border:"1px solid #f0c8bf", fontSize:"11px" }} />
+                    <button className="abtn" onClick={() => { if (customStartDate && customEndDate) fetchBestSellers("custom", customStartDate, customEndDate); }}
+                      style={{ background:"#d96c4a", color:"#fff", padding:"4px 10px", fontSize:"11px" }}>Filter</button>
+                  </div>
+                )}
+                {bestSellers.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"40px 0", color:"#ccc", fontSize:"13px" }}>No sales data yet for this period.</div>
+                ) : (
+                  <div style={{ overflowX:"auto" }}>
+                    <div style={{ minWidth:"300px" }}>
+                      {/* SVG Bar Chart */}
+                      <BestSellerBarChart data={bestSellers.slice(0,6)} />
+                    </div>
+                  </div>
+                )}
+                <div style={{ marginTop:"12px", textAlign:"right" }}>
+                  <button className="abtn" onClick={() => setActiveTab("best-sellers")} style={{ background:"#f0c8bf", color:"#5b2d1c", padding:"5px 12px", fontSize:"12px" }}>Full Report →</button>
+                </div>
+              </div>
+
+              {/* Sales Rate Area Chart */}
+              <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", padding:"20px", minHeight:"280px" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px" }}>
+                  <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"16px", fontWeight:800 }}>📈 Sales Rate</h2>
+                  <span style={{ fontSize:"11px", background:"#fff0e8", color:"#d96c4a", padding:"4px 10px", borderRadius:"12px", fontWeight:700 }}>Monthly Revenue</span>
+                </div>
+                {salesRate.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"40px 0", color:"#ccc", fontSize:"13px" }}>No revenue data available yet.</div>
+                ) : (
+                  <SalesRateAreaChart data={salesRate} />
+                )}
+              </div>
+            </div>
+
+            {/* ── Recent Orders ── */}
+            <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", overflow:"hidden" }}>
               <div style={{ padding:"16px 20px", borderBottom:"1px solid #f7e5de", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"17px" }}>Recent Orders</h2>
-                <button className="abtn" onClick={() => setActiveTab("orders")} style={{ background:"#f0c8bf", color:"#5b2d1c", padding:"6px 14px", fontSize:"13px" }}>See All</button>
+                <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"16px", fontWeight:800 }}>📋 Recent Orders</h2>
+                <button className="abtn" onClick={() => setActiveTab("orders")} style={{ background:"#f0c8bf", color:"#5b2d1c", padding:"6px 14px", fontSize:"12px" }}>See All</button>
               </div>
               <div style={{ overflowX:"auto" }}>
                 <table style={{ width:"100%", minWidth:"500px", borderCollapse:"collapse" }}>
                   <thead><tr style={{ background:"#fff7f2", textAlign:"left" }}>
-                    {["Order #","Customer","Total","Payment","Status"].map(h => <th key={h} style={{ padding:"11px 16px", fontSize:"13px" }}>{h}</th>)}
+                    {["Order #","Customer","Total","Payment","Status"].map(h => <th key={h} style={{ padding:"11px 16px", fontSize:"12px", color:"#9a7060", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.4px" }}>{h}</th>)}
                   </tr></thead>
                   <tbody>
                     {orders.slice(0,6).map(o => (
                       <tr key={o.id} style={{ borderTop:"1px solid #f6e3de" }}>
-                        <td style={{ padding:"11px 16px", fontWeight:700, color:"#d96c4a" }}>{o.order_number}</td>
-                        <td style={{ padding:"11px 16px" }}><div style={{ fontWeight:600, fontSize:"13px" }}>{o.customer_name}</div><div style={{ fontSize:"11px", color:"#888" }}>{o.customer_email}</div></td>
-                        <td style={{ padding:"11px 16px", fontWeight:700 }}>\u20B1{Number(o.total_amount).toFixed(2)}</td>
+                        <td style={{ padding:"11px 16px", fontWeight:800, color:"#d96c4a", fontSize:"13px" }}>{o.order_number}</td>
+                        <td style={{ padding:"11px 16px" }}><div style={{ fontWeight:600, fontSize:"13px" }}>{o.customer_name}</div><div style={{ fontSize:"11px", color:"#aaa" }}>{o.customer_email}</div></td>
+                        <td style={{ padding:"11px 16px", fontWeight:700 }}>₱{Number(o.total_amount).toFixed(2)}</td>
                         <td style={{ padding:"11px 16px" }}>{paymentBadge(o.payment_status)}</td>
                         <td style={{ padding:"11px 16px" }}>{orderStatusBadge(o.order_status)}</td>
                       </tr>
                     ))}
-                    {orders.length === 0 && <tr><td colSpan="5" style={{ padding:"28px", textAlign:"center", color:"#bbb" }}>No orders yet.</td></tr>}
+                    {orders.length === 0 && <tr><td colSpan="5" style={{ padding:"28px", textAlign:"center", color:"#ccc" }}>No orders yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Best Sellers Full Tab ── */}
+        {activeTab === "best-sellers" && (
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px", flexWrap:"wrap", gap:"12px" }}>
+              <div>
+                <h1 style={{ color:"#5b2d1c", margin:0, fontSize:"24px", fontWeight:800 }}>🏆 Best Seller Report</h1>
+                <p style={{ color:"#999", margin:"4px 0 0", fontSize:"13px" }}>Top-selling products aggregated from existing order history.</p>
+              </div>
+              <div style={{ display:"flex", gap:"6px", flexWrap:"wrap" }}>
+                {["today","week","month","all","custom"].map(p => (
+                  <button key={p} onClick={() => setBestSellerPeriod(p)}
+                    style={{ padding:"7px 16px", borderRadius:"20px", border:"1.5px solid", cursor:"pointer", fontSize:"12px", fontWeight:700,
+                      borderColor: bestSellerPeriod===p ? "#d96c4a" : "#f0c8bf",
+                      background: bestSellerPeriod===p ? "#d96c4a" : "#fff",
+                      color: bestSellerPeriod===p ? "#fff" : "#9a7060" }}>
+                    {p === "custom" ? "Custom Range" : p.charAt(0).toUpperCase()+p.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {bestSellerPeriod === "custom" && (
+              <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"20px", padding:"12px 18px", background:"#fff", borderRadius:"12px", border:"1.5px solid #f0c8bf", flexWrap:"wrap", fontSize:"13px" }}>
+                <span style={{ color:"#5b2d1c", fontWeight:700 }}>Custom Date Range:</span>
+                <input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)}
+                  style={{ padding:"6px 10px", borderRadius:"8px", border:"1.5px solid #f0c8bf", fontSize:"13px" }} />
+                <span style={{ color:"#9a7060", fontWeight:600 }}>to</span>
+                <input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)}
+                  style={{ padding:"6px 10px", borderRadius:"8px", border:"1.5px solid #f0c8bf", fontSize:"13px" }} />
+                <button className="abtn" onClick={() => { if (customStartDate && customEndDate) fetchBestSellers("custom", customStartDate, customEndDate); }}
+                  style={{ background:"#d96c4a", color:"#fff", padding:"7px 16px", fontSize:"13px" }}>Filter Range</button>
+              </div>
+            )}
+
+            {bestSellers.length === 0 ? (
+              <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", padding:"60px", textAlign:"center", color:"#bbb" }}>
+                <div style={{ fontSize:"40px", marginBottom:"12px" }}>🍩</div>
+                <div>No sales data for this period.</div>
+              </div>
+            ) : (
+              <div style={{ display:"grid", gap:"16px" }}>
+                {/* Large bar chart */}
+                <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", padding:"28px" }}>
+                  <BestSellerBarChart data={bestSellers} tall />
+                </div>
+                {/* Detail table */}
+                <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", overflow:"hidden" }}>
+                  <div style={{ padding:"16px 20px", borderBottom:"1px solid #f0c8bf" }}>
+                    <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"16px", fontWeight:800 }}>Detailed Rankings</h2>
+                  </div>
+                  <div style={{ overflowX:"auto" }}>
+                    <table style={{ width:"100%", borderCollapse:"collapse", minWidth:"600px" }}>
+                      <thead><tr style={{ background:"#fff7f2", textAlign:"left" }}>
+                        {["Rank","Product","Units Sold","Revenue","% of Sales","Stock"].map(h =>
+                          <th key={h} style={{ padding:"11px 16px", fontSize:"11px", color:"#9a7060", fontWeight:700, textTransform:"uppercase" }}>{h}</th>
+                        )}
+                      </tr></thead>
+                      <tbody>
+                        {bestSellers.map(p => (
+                          <tr key={p.productId} style={{ borderTop:"1px solid #f6e3de" }}>
+                            <td style={{ padding:"12px 16px" }}>
+                              <span style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", width:"28px", height:"28px", borderRadius:"50%",
+                                background: p.rank===1?"#fbbf24":p.rank===2?"#9ca3af":p.rank===3?"#cd7c36":"#f0c8bf",
+                                color: p.rank<=3?"#fff":"#5b2d1c", fontWeight:900, fontSize:"13px" }}>{p.rank}</span>
+                            </td>
+                            <td style={{ padding:"12px 16px" }}>
+                              <div style={{ fontWeight:700, fontSize:"14px", color:"#5b2d1c" }}>{p.productName}</div>
+                              <div style={{ fontSize:"11px", color:"#aaa" }}>₱{p.currentPrice.toFixed(2)}</div>
+                            </td>
+                            <td style={{ padding:"12px 16px", fontWeight:800, color:"#d96c4a", fontSize:"16px" }}>{p.unitsSold}</td>
+                            <td style={{ padding:"12px 16px", fontWeight:700 }}>₱{p.salesRevenue.toFixed(2)}</td>
+                            <td style={{ padding:"12px 16px" }}>
+                              <div style={{ display:"flex", alignItems:"center", gap:"6px" }}>
+                                <div style={{ flex:1, height:"6px", background:"#f0c8bf", borderRadius:"3px" }}>
+                                  <div style={{ width:`${p.percentageOfUnits}%`, height:"100%", background:"#d96c4a", borderRadius:"3px" }} />
+                                </div>
+                                <span style={{ fontSize:"11px", fontWeight:700, color:"#d96c4a" }}>{p.percentageOfUnits}%</span>
+                              </div>
+                            </td>
+                            <td style={{ padding:"12px 16px" }}>
+                              <span style={{ fontSize:"12px", fontWeight:700, padding:"3px 8px", borderRadius:"8px",
+                                background: p.stockStatus==="out_of_stock"?"#fee2e2":p.stockStatus==="low_stock"?"#fef3c7":"#dcfce7",
+                                color: p.stockStatus==="out_of_stock"?"#dc2626":p.stockStatus==="low_stock"?"#92400e":"#166534" }}>
+                                {p.currentStock} units
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Last Call Deals Tab ── */}
+        {activeTab === "last-call" && (
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px", flexWrap:"wrap", gap:"12px" }}>
+              <div>
+                <h1 style={{ color:"#5b2d1c", margin:0, fontSize:"24px", fontWeight:800 }}>🔥 Last Call Deals</h1>
+                <p style={{ color:"#999", margin:"4px 0 0", fontSize:"13px" }}>Automatic end-of-day discounts on slow-moving inventory. Zero changes to core pricing data.</p>
+              </div>
+              <button className="abtn" onClick={fetchLastCallData} style={{ background:"#fff0e8", border:"1.5px solid #d96c4a", color:"#d96c4a", padding:"8px 16px", fontSize:"13px" }}>🔄 Refresh</button>
+            </div>
+
+            {/* Window status banner */}
+            {lastCallData && (
+              <div style={{ borderRadius:"12px", padding:"14px 20px", marginBottom:"20px", border:"1.5px solid",
+                background: lastCallData.windowStatus?.active ? "#fff7ed" : "#f9fafb",
+                borderColor: lastCallData.windowStatus?.active ? "#f97316" : "#e5e7eb" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+                  <span style={{ fontSize:"20px" }}>{lastCallData.windowStatus?.active ? "🟠" : "⚫"}</span>
+                  <div>
+                    <div style={{ fontWeight:800, color: lastCallData.windowStatus?.active ? "#c2410c" : "#374151", fontSize:"14px" }}>
+                      {lastCallData.windowStatus?.active ? `🔥 Last Call is LIVE! ${lastCallData.activeDealCount} active deals right now.` : "Last Call window is not active."}
+                    </div>
+                    <div style={{ fontSize:"12px", color:"#888", marginTop:"2px" }}>{lastCallData.windowStatus?.reason}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Settings Panel (owner only) */}
+            {currentAdmin?.role === "owner" && lastCallSettings && lcSettingsForm && (
+              <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", padding:"20px", marginBottom:"20px" }}>
+                <h2 style={{ color:"#5b2d1c", margin:"0 0 16px", fontSize:"16px", fontWeight:800 }}>⚙️ Deal Settings</h2>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:"14px" }}>
+                  {[
+                    { key:"startTime",       label:"Start Time",        type:"time" },
+                    { key:"endTime",         label:"End Time",          type:"time" },
+                    { key:"minStock",        label:"Min Stock Required", type:"number" },
+                    { key:"minDiscount",     label:"Min Discount %",    type:"number" },
+                    { key:"maxDiscount",     label:"Max Discount %",    type:"number" },
+                    { key:"maxDailySales",   label:"Max Daily Sales (threshold)", type:"number" },
+                  ].map(({ key, label, type }) => (
+                    <div key={key}>
+                      <label style={{ fontSize:"11px", fontWeight:700, color:"#9a7060", display:"block", marginBottom:"4px", textTransform:"uppercase" }}>{label}</label>
+                      <input type={type} value={lcSettingsForm[key] ?? ""}
+                        onChange={e => setLcSettingsForm(prev => ({ ...prev, [key]: type==="number" ? Number(e.target.value) : e.target.value }))}
+                        style={{ width:"100%", padding:"8px 10px", borderRadius:"8px", border:"1.5px solid #f0c8bf", fontSize:"13px", boxSizing:"border-box" }} />
+                    </div>
+                  ))}
+                  <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+                    <label style={{ fontSize:"11px", fontWeight:700, color:"#9a7060", textTransform:"uppercase" }}>Enabled</label>
+                    <input type="checkbox" checked={lcSettingsForm.enabled} onChange={e => setLcSettingsForm(prev => ({ ...prev, enabled: e.target.checked }))} style={{ width:"18px", height:"18px", cursor:"pointer" }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize:"11px", fontWeight:700, color:"#9a7060", display:"block", marginBottom:"4px", textTransform:"uppercase" }}>Manual Override</label>
+                    <select value={lcSettingsForm.manualOverride} onChange={e => setLcSettingsForm(prev => ({ ...prev, manualOverride: e.target.value }))}
+                      style={{ width:"100%", padding:"8px 10px", borderRadius:"8px", border:"1.5px solid #f0c8bf", fontSize:"13px", background:"#fff" }}>
+                      <option value="auto">Auto (Scheduled)</option>
+                      <option value="force_on">Force ON (Testing)</option>
+                      <option value="force_off">Force OFF</option>
+                    </select>
+                  </div>
+                </div>
+                <div style={{ marginTop:"16px", display:"flex", gap:"10px" }}>
+                  <button className="abtn" disabled={savingLCSettings}
+                    onClick={async () => {
+                      setSavingLCSettings(true);
+                      try {
+                        const res = await fetch("/api/deals/last-call/settings", {
+                          method:"PUT",
+                          headers: { "Content-Type":"application/json", ...(token ? { Authorization:`Bearer ${token}` } : {}) },
+                          credentials:"include",
+                          body: JSON.stringify(lcSettingsForm),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(data.message || "Failed to save");
+                        showToast("✅ Last Call settings saved!");
+                        await fetchLastCallData();
+                      } catch (err) {
+                        showToast(err.message || "Save failed.");
+                      } finally {
+                        setSavingLCSettings(false);
+                      }
+                    }}
+                    style={{ background:"#d96c4a", color:"#fff", padding:"9px 20px", fontSize:"13px" }}>
+                    {savingLCSettings ? "Saving..." : "💾 Save Settings"}
+                  </button>
+                  <button className="abtn" onClick={() => setLcSettingsForm(lastCallSettings)}
+                    style={{ background:"#f0c8bf", color:"#5b2d1c", padding:"9px 20px", fontSize:"13px" }}>Reset</button>
+                </div>
+              </div>
+            )}
+
+            {/* Deals Product Table */}
+            <div style={{ background:"#fff", borderRadius:"16px", border:"1.5px solid #f0c8bf", overflow:"hidden" }}>
+              <div style={{ padding:"16px 20px", borderBottom:"1px solid #f0c8bf", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <h2 style={{ margin:0, color:"#5b2d1c", fontSize:"16px", fontWeight:800 }}>All Products — Deal Evaluation</h2>
+                <div style={{ display:"flex", gap:"10px", fontSize:"12px" }}>
+                  <span style={{ background:"#fff7ed", color:"#c2410c", padding:"4px 10px", borderRadius:"10px", fontWeight:700 }}>🔥 {lastCallData?.activeDealCount ?? 0} Active</span>
+                  <span style={{ background:"#dcfce7", color:"#166534", padding:"4px 10px", borderRadius:"10px", fontWeight:700 }}>✅ {lastCallData?.eligibleCount ?? 0} Eligible</span>
+                </div>
+              </div>
+              <div style={{ overflowX:"auto" }}>
+                <table style={{ width:"100%", borderCollapse:"collapse", minWidth:"700px" }}>
+                  <thead><tr style={{ background:"#fff7f2", textAlign:"left" }}>
+                    {["Product","Stock","Original Price","Deal Price","Discount","Today's Sales","Status"].map(h =>
+                      <th key={h} style={{ padding:"11px 16px", fontSize:"11px", color:"#9a7060", fontWeight:700, textTransform:"uppercase" }}>{h}</th>
+                    )}
+                  </tr></thead>
+                  <tbody>
+                    {(lastCallData?.allProducts || []).map(p => (
+                      <tr key={p.productId} style={{ borderTop:"1px solid #f6e3de", background: p.isDealActive ? "#fff7ed" : "#fff" }}>
+                        <td style={{ padding:"12px 16px" }}>
+                          <div style={{ fontWeight:700, color:"#5b2d1c", fontSize:"13px" }}>{p.productName}</div>
+                          <div style={{ fontSize:"11px", color:"#aaa" }}>{p.description?.slice(0,40)}</div>
+                        </td>
+                        <td style={{ padding:"12px 16px", fontWeight:700 }}>{p.stockQuantity}</td>
+                        <td style={{ padding:"12px 16px" }}>₱{p.originalPrice.toFixed(2)}</td>
+                        <td style={{ padding:"12px 16px", fontWeight:800, color: p.isEligible ? "#c2410c" : "#aaa" }}>
+                          {p.isEligible ? `₱${p.discountedPrice.toFixed(2)}` : "—"}
+                        </td>
+                        <td style={{ padding:"12px 16px" }}>
+                          {p.isEligible ? (
+                            <span style={{ background:"#fff7ed", color:"#c2410c", padding:"3px 8px", borderRadius:"8px", fontSize:"12px", fontWeight:800 }}>{p.discountPercentage}% OFF</span>
+                          ) : "—"}
+                        </td>
+                        <td style={{ padding:"12px 16px" }}>{p.todaySales}</td>
+                        <td style={{ padding:"12px 16px" }}>
+                          <span style={{ fontSize:"11px", fontWeight:700, padding:"3px 9px", borderRadius:"8px",
+                            background: p.isDealActive?"#fff7ed":p.isEligible?"#f0fdf4":"#f3f4f6",
+                            color: p.isDealActive?"#c2410c":p.isEligible?"#166534":"#6b7280" }}>
+                            {p.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {(!lastCallData?.allProducts || lastCallData.allProducts.length === 0) && (
+                      <tr><td colSpan="7" style={{ padding:"40px", textAlign:"center", color:"#bbb" }}>No products evaluated yet. Click Refresh.</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
